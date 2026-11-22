@@ -11,6 +11,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, stopServer } from "./server/index.js";
+import { SUPPORTED_MODELS } from "./adapter/openai-to-cli.js";
 import type { Server } from "http";
 import type { AddressInfo } from "net";
 
@@ -55,17 +56,7 @@ describe("health and models", () => {
     assert.ok(Array.isArray(body.data));
 
     const ids = body.data.map((m: any) => m.id);
-    for (const expected of [
-      "claude-opus-4",
-      "claude-opus-4-6",
-      "claude-sonnet-4",
-      "claude-sonnet-4-5",
-      "claude-sonnet-4-6",
-      "claude-haiku-4",
-      "claude-haiku-4-5",
-    ]) {
-      assert.ok(ids.includes(expected), `missing model ${expected}`);
-    }
+    assert.deepEqual(ids, [...SUPPORTED_MODELS]);
 
     for (const model of body.data) {
       assert.equal(model.object, "model");
@@ -83,12 +74,28 @@ describe("health and models", () => {
     const res = await fetch(`${baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "haiku", messages: [] }),
+      body: JSON.stringify({ model: "claude-haiku-4-5", messages: [] }),
     });
     assert.equal(res.status, 400);
     const body = await res.json() as any;
     assert.ok(body.error);
     assert.equal(body.error.code, "invalid_messages");
+  });
+
+  it("returns 404 model_not_found for an unsupported model", async () => {
+    const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4",
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+    assert.equal(res.status, 404);
+    const body = await res.json() as any;
+    assert.equal(body.error.code, "model_not_found");
+    assert.equal(body.error.param, "model");
+    assert.ok(body.error.message.includes("claude-opus-5-5"));
   });
 });
 
@@ -100,7 +107,7 @@ describe("non-streaming completion", { timeout: TEST_TIMEOUT }, () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "claude-haiku-4",
+        model: "claude-haiku-4-5",
         stream: false,
         messages: [
           {
@@ -144,7 +151,7 @@ describe("non-streaming completion", { timeout: TEST_TIMEOUT }, () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "haiku",
+        model: "claude-haiku-4-5",
         stream: false,
         messages: [
           {
@@ -169,7 +176,7 @@ describe("streaming completion", { timeout: TEST_TIMEOUT }, () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "claude-haiku-4",
+        model: "claude-haiku-4-5",
         stream: true,
         messages: [
           {

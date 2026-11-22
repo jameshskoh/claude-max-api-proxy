@@ -28,9 +28,9 @@ The Clawdbot plugin wrapper stays in `src/index.ts`. It registers the provider w
 
 ## Where in the code
 
-- `src/index.ts:80-191`: `registerProvider` call, with the dummy `local` token at line 149.
-- `src/index.ts:203-231`: `claude-cli:start`, `claude-cli:stop` and `claude-cli:status` commands.
-- `src/index.ts:18-37`: `AVAILABLE_MODELS`, the models the plugin advertises.
+- `src/index.ts:77-188`: `registerProvider` call, with the dummy `local` token at line 149.
+- `src/index.ts:200-228`: `claude-cli:start`, `claude-cli:stop` and `claude-cli:status` commands.
+- `src/index.ts:18-34`: `AVAILABLE_MODELS`, the models the plugin advertises.
 - `src/server/index.ts:74-76`: the three routes.
 - `src/server/index.ts:108`: default bind address `127.0.0.1`.
 - `src/server/standalone.ts:16-73`: standalone entry point.

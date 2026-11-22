@@ -57,4 +57,4 @@ launchctl list com.openclaw.claude-max-proxy
 - `docs/adrs/README.md` - Index of design decisions. Read the matching ADR before changing that behaviour.
 - `docs/security-review/` - Security, telemetry and malicious-code review of commit `3e88f2f`.
 
-Line references in these docs are as of commit `2074263`. If you change code they cite, update the references.
+Line references in these docs were last updated on 2026-11-23. If you change code they cite, update the references.

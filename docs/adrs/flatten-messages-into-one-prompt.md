@@ -5,22 +5,22 @@
 
 ## Context
 
-`--print` mode takes one prompt, not a message list (`src/adapter/openai-to-cli.ts:102-107`). Old `PROTOCOL.md` proposed `--input-format stream-json` with `{"type": "user_message"}` lines. That section is marked TODO and was never verified (old `PROTOCOL.md:139-145`).
+`--print` mode takes one prompt, not a message list (`src/adapter/openai-to-cli.ts:107-112`). Old `PROTOCOL.md` proposed `--input-format stream-json` with `{"type": "user_message"}` lines. That section is marked TODO and was never verified (old `PROTOCOL.md:139-145`).
 
 Old `DESIGN.md` showed `[System]:` and `[Previous response]:` prefixes (old `DESIGN.md:326`, `331`). The code used XML-like tags from the first commit, so the prefix format never shipped.
 
 ## Decision
 
-`messagesToPrompt` joins all messages with a newline (`openai-to-cli.ts:108-135`):
+`messagesToPrompt` joins all messages with a newline (`openai-to-cli.ts:113-140`):
 
-- `system` becomes `<system>...</system>`, after OpenClaw tooling sections are stripped (`openai-to-cli.ts:80-100`).
+- `system` becomes `<system>...</system>`, after OpenClaw tooling sections are stripped (`openai-to-cli.ts:85-105`).
 - `user` is raw text.
 - `assistant` becomes `<previous_response>...</previous_response>`.
 - `tool` is dropped.
 
-Content arrays keep only `text` and `input_text` blocks (`openai-to-cli.ts:60-71`). Images are dropped without an error. The joined string goes to stdin (`manager.ts:240-242`).
+Content arrays keep only `text` and `input_text` blocks (`openai-to-cli.ts:65-76`). Images are dropped without an error. The joined string goes to stdin (`manager.ts:240-242`).
 
-On resume, assistant messages are dropped, because the CLI already holds them (`openai-to-cli.ts:154-169`).
+On resume, assistant messages are dropped, because the CLI already holds them (`openai-to-cli.ts:159-174`).
 
 ## Consequences
 
@@ -29,10 +29,10 @@ On resume, assistant messages are dropped, because the CLI already holds them (`
 
 ## Where in the code
 
-- `src/adapter/openai-to-cli.ts:60-71`: `extractText`, keeps text blocks only.
-- `src/adapter/openai-to-cli.ts:80-100`: `stripOpenClawTooling`.
-- `src/adapter/openai-to-cli.ts:108-135`: `messagesToPrompt`, role mapping.
-- `src/adapter/openai-to-cli.ts:154-169`: `openaiToCliDelta`, drops assistant turns on resume.
+- `src/adapter/openai-to-cli.ts:65-76`: `extractText`, keeps text blocks only.
+- `src/adapter/openai-to-cli.ts:85-105`: `stripOpenClawTooling`.
+- `src/adapter/openai-to-cli.ts:113-140`: `messagesToPrompt`, role mapping.
+- `src/adapter/openai-to-cli.ts:159-174`: `openaiToCliDelta`, drops assistant turns on resume.
 - `src/subprocess/manager.ts:240-242`: prompt written to stdin.
 
 ## Revisit when
