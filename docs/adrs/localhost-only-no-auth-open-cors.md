@@ -7,7 +7,7 @@
 
 - The proxy is a local helper for OpenAI-compatible clients on the same machine.
 - The original design assumed that binding to loopback was enough (old `DESIGN.md:768-774`).
-- The OpenClaw provider setup starts the server and gives clients a dummy key, `local` (`src/index.ts:149`, `src/index.ts:158`). The server never checks it.
+- The OpenClaw provider setup starts the server and gives clients a dummy key, `local` (`src/index.ts:146`, `src/index.ts:155`). The server never checks it.
 
 ## Decision
 
@@ -30,7 +30,7 @@
 - `src/server/index.ts:60-71`: CORS headers and the OPTIONS handler.
 - `src/server/index.ts:74-76`: routes, with no auth middleware.
 - `src/server/index.ts:90-99`: error handler that returns `err.message`.
-- `src/index.ts:140-162`: provider setup. Starts the server and sends the dummy key `local`.
+- `src/index.ts:137-159`: provider setup. Starts the server and sends the dummy key `local`.
 
 ## Revisit when
 

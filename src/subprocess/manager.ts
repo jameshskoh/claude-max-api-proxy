@@ -25,10 +25,10 @@ import {
   isInputJsonDelta,
   isContentBlockStop,
 } from "../types/claude-cli.js";
-import type { ClaudeModel } from "../adapter/openai-to-cli.js";
+import type { SupportedModel } from "../adapter/openai-to-cli.js";
 
 export interface SubprocessOptions {
-  model: ClaudeModel;
+  model: SupportedModel;
   sessionId?: string;
   /** Resume an existing persisted session (sessionId) instead of creating a new one */
   resume?: boolean;
@@ -301,7 +301,7 @@ export class ClaudeSubprocess extends EventEmitter {
       "--verbose", // Required for stream-json
       "--include-partial-messages", // Enable streaming chunks
       "--model",
-      options.model, // Model alias (opus/sonnet/haiku)
+      options.model, // Full model ID, e.g. claude-opus-5-5
       "--append-system-prompt",
       OPENCLAW_TOOL_MAPPING_PROMPT,
       // Prompt is passed via stdin (avoids E2BIG on large inputs)

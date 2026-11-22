@@ -7,14 +7,14 @@
 import type { Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { ClaudeSubprocess } from "../subprocess/manager.js";
-import { openaiToCli, openaiToCliDelta } from "../adapter/openai-to-cli.js";
+import { openaiToCli, openaiToCliDelta, extractModel, SUPPORTED_MODELS } from "../adapter/openai-to-cli.js";
 import {
   cliResultToOpenai,
   createDoneChunk,
 } from "../adapter/cli-to-openai.js";
 import { getSession, setSession, clearSession } from "../subprocess/session-store.js";
 import type { OpenAIChatRequest, OpenAIToolCall } from "../types/openai.js";
-import type { ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
+import type { ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
 
 interface SessionContext {
   sessionKey: string | undefined;
@@ -73,6 +73,18 @@ export async function handleChatCompletions(
           message: "messages is required and must be a non-empty array",
           type: "invalid_request_error",
           code: "invalid_messages",
+        },
+      });
+      return;
+    }
+
+    if (!extractModel(body.model)) {
+      res.status(404).json({
+        error: {
+          message: `The model ${JSON.stringify(body.model ?? null)} is not supported. Supported models: ${SUPPORTED_MODELS.join(", ")}`,
+          type: "invalid_request_error",
+          param: "model",
+          code: "model_not_found",
         },
       });
       return;
@@ -142,7 +154,7 @@ async function handleStreamingResponse(
 
   return new Promise<void>((resolve, reject) => {
     let isFirst = true;
-    let lastModel = "claude-sonnet-4";
+    const responseModel = cliInput.model;
     let isComplete = false;
     let hasEmittedText = false;
     let toolCallIndex = 0;
@@ -165,7 +177,7 @@ async function handleStreamingResponse(
           id: `chatcmpl-${requestId}`,
           object: "chat.completion.chunk",
           created: Math.floor(Date.now() / 1000),
-          model: lastModel,
+          model: responseModel,
           choices: [{
             index: 0,
             delta: {
@@ -187,7 +199,7 @@ async function handleStreamingResponse(
           id: `chatcmpl-${requestId}`,
           object: "chat.completion.chunk",
           created: Math.floor(Date.now() / 1000),
-          model: lastModel,
+          model: responseModel,
           choices: [{
             index: 0,
             delta: {
@@ -274,11 +286,6 @@ async function handleStreamingResponse(
     //   }
     // });
 
-    // Handle final assistant message (for model name)
-    subprocess.on("assistant", (message: ClaudeCliAssistant) => {
-      lastModel = message.message.model;
-    });
-
     subprocess.on("result", (result: ClaudeCliResult) => {
       isComplete = true;
       if (sessionCtx.sessionKey && cliInput.sessionId) {
@@ -286,7 +293,7 @@ async function handleStreamingResponse(
       }
       if (!res.writableEnded) {
         // Send final done chunk with finish_reason and usage data
-        const doneChunk = createDoneChunk(requestId, lastModel);
+        const doneChunk = createDoneChunk(requestId, responseModel);
         if (result.usage) {
           doneChunk.usage = {
             prompt_tokens: result.usage.input_tokens || 0,
@@ -406,7 +413,7 @@ async function handleNonStreamingResponse(
         if (sessionCtx.sessionKey && cliInput.sessionId) {
           setSession(sessionCtx.sessionKey, cliInput.sessionId, sessionCtx.messageCount);
         }
-        res.json(cliResultToOpenai(finalResult, requestId));
+        res.json(cliResultToOpenai(finalResult, requestId, cliInput.model));
       } else {
         if (sessionCtx.resume && sessionCtx.sessionKey) {
           clearSession(sessionCtx.sessionKey);
@@ -451,17 +458,7 @@ async function handleNonStreamingResponse(
  */
 export function handleModels(_req: Request, res: Response): void {
   const now = Math.floor(Date.now() / 1000);
-  const modelIds = [
-    "claude-opus-4",
-    "claude-opus-4-6",
-    "claude-sonnet-4",
-    "claude-sonnet-4-5",
-    "claude-sonnet-4-6",
-    "claude-sonnet-5",
-    "claude-opus-5",
-    "claude-haiku-4",
-    "claude-haiku-4-5",
-  ];
+  const modelIds = SUPPORTED_MODELS;
   res.json({
     object: "list",
     data: modelIds.map((id) => ({

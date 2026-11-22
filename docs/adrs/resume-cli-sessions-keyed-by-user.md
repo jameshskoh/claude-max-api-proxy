@@ -33,14 +33,14 @@
 
 ## Where in the code
 
-- `src/server/routes.ts:19-53`: `resolveCliInput` picks resume or first turn from `body.user`.
-- `src/server/routes.ts:282-303`: streaming `result` handler saves the session.
-- `src/server/routes.ts:305-341`: streaming error and close handlers clear a failed resume.
-- `src/server/routes.ts:385-425`: non-streaming handlers save on success and clear on failure.
+- `src/server/routes.ts:30-53`: `resolveCliInput` picks resume or first turn from `body.user`.
+- `src/server/routes.ts:289-310`: streaming `result` handler saves the session.
+- `src/server/routes.ts:312-348`: streaming error and close handlers clear a failed resume.
+- `src/server/routes.ts:392-432`: non-streaming handlers save on success and clear on failure.
 - `src/subprocess/session-store.ts:1-54`: in-memory map, TTL, 30-minute sweep, get, set and clear.
-- `src/adapter/openai-to-cli.ts:148-169`: `openaiToCliDelta` keeps messages after `messageCount` and drops assistant turns.
+- `src/adapter/openai-to-cli.ts:153-174`: `openaiToCliDelta` keeps messages after `messageCount` and drops assistant turns.
 - `src/subprocess/manager.ts:310-321`: chooses `--resume`, `--session-id` or `--no-session-persistence`.
-- `src/session/manager.ts`: legacy file store. Only re-exported from `src/index.ts:243`.
+- `src/session/manager.ts`: legacy file store. Only re-exported from `src/index.ts:240`.
 
 ## Revisit when
 

@@ -106,7 +106,7 @@ curl http://localhost:3456/v1/models
 curl -X POST http://localhost:3456/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4",
+    "model": "claude-sonnet-5-5",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 
@@ -114,7 +114,7 @@ curl -X POST http://localhost:3456/v1/chat/completions \
 curl -N -X POST http://localhost:3456/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4",
+    "model": "claude-sonnet-5-5",
     "messages": [{"role": "user", "content": "Hello!"}],
     "stream": true
   }'
@@ -128,15 +128,24 @@ curl -N -X POST http://localhost:3456/v1/chat/completions \
 | `/v1/models` | GET | List available models |
 | `/v1/chat/completions` | POST | Chat completions (streaming & non-streaming) |
 
-## Available Models
+## Supported Models
 
-| Model ID | Alias | CLI Model |
-|----------|-------|-----------|
-| `claude-opus-4` | `opus` | Claude Opus |
-| `claude-sonnet-4` | `sonnet` | Claude Sonnet |
-| `claude-haiku-4` | `haiku` | Claude Haiku |
+The proxy passes the model ID to the Claude Code CLI exactly as given. `GET /v1/models` lists these IDs:
 
-All model IDs also accept a `claude-code-cli/` prefix (e.g., `claude-code-cli/claude-opus-4`). Unknown models default to Opus.
+- `claude-opus-5-5`
+- `claude-sonnet-5-5`
+- `claude-haiku-5-5`
+- `claude-opus-5`
+- `claude-sonnet-5`
+- `claude-opus-4-8`
+- `claude-opus-4-7`
+- `claude-opus-4-6`
+- `claude-sonnet-4-6`
+- `claude-sonnet-4-5`
+- `claude-haiku-4-5`
+
+- IDs may take a `claude-code-cli/` or `claude-max/` prefix (e.g., `claude-code-cli/claude-opus-5-5`).
+- Any other model returns HTTP 404 `model_not_found`, with the list of supported IDs in the error message.
 
 ## Configuration with Popular Tools
 
@@ -153,7 +162,7 @@ Add to your Continue config:
   "models": [{
     "title": "Claude (Max)",
     "provider": "openai",
-    "model": "claude-sonnet-4",
+    "model": "claude-sonnet-5-5",
     "apiBase": "http://localhost:3456/v1",
     "apiKey": "not-needed"
   }]
@@ -171,7 +180,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="claude-sonnet-4",
+    model="claude-sonnet-5-5",
     messages=[{"role": "user", "content": "Hello!"}]
 )
 ```

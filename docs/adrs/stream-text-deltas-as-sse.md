@@ -17,7 +17,7 @@
 - Client disconnect is detected with `res.on("close")`, not `req.on("close")`. The `req` event fires when the body is received. If the response is still open, the subprocess is killed.
 - The final chunk carries `finish_reason: "stop"` and usage. Then the stream sends `data: [DONE]`.
 - Errors are sent as a `data: {"error": ...}` line.
-- The `assistant` event only updates the model name.
+- Every chunk carries the requested model ID. The CLI's `assistant` event is not used.
 
 ## Consequences
 
@@ -31,13 +31,13 @@
 
 ## Where in the code
 
-- `src/server/routes.ts:122-141`: SSE headers, immediate flush and the `:ok` comment.
-- `src/server/routes.ts:152-158`: `res.on("close")` kills the subprocess on early disconnect.
-- `src/server/routes.ts:162-179`: text block separator chunk.
-- `src/server/routes.ts:182-204`: `content_delta` handler that writes text chunks.
-- `src/server/routes.ts:278-280`: `assistant` handler, model name only.
-- `src/server/routes.ts:282-303`: `result` handler writes the final chunk with usage, then `[DONE]`.
-- `src/server/routes.ts:305-341`: error and close handlers.
+- `src/server/routes.ts:134-153`: SSE headers, immediate flush and the `:ok` comment.
+- `src/server/routes.ts:164-170`: `res.on("close")` kills the subprocess on early disconnect.
+- `src/server/routes.ts:174-191`: text block separator chunk.
+- `src/server/routes.ts:194-216`: `content_delta` handler that writes text chunks.
+- `src/server/routes.ts:157`: `responseModel`, the requested model ID carried on each chunk.
+- `src/server/routes.ts:289-310`: `result` handler writes the final chunk with usage, then `[DONE]`.
+- `src/server/routes.ts:312-348`: error and close handlers.
 - `src/subprocess/manager.ts:295-371`: argument list with `--include-partial-messages`, line parsing and event emission.
 - `src/types/claude-cli.ts:102-197`: `stream_event` type and type guards.
 - `src/adapter/cli-to-openai.ts:46-63`: `createDoneChunk`.

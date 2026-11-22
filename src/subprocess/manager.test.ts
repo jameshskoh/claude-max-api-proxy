@@ -106,7 +106,7 @@ describe("Windows process-tree termination", { skip: WINDOWS_ONLY }, () => {
     const descendantPidPromise = readManagerDescendantPid(subprocess);
     subprocess.on("error", () => {});
 
-    await subprocess.start("", { model: "haiku", timeout: WAIT_TIMEOUT_MS });
+    await subprocess.start("", { model: "claude-haiku-4-5", timeout: WAIT_TIMEOUT_MS });
     const rootPid = trackManagerProcess(subprocess, cleanupPids);
     const descendantPid = await descendantPidPromise;
     cleanupPids.add(descendantPid);
@@ -127,7 +127,7 @@ describe("Windows process-tree termination", { skip: WINDOWS_ONLY }, () => {
     });
 
     await subprocess.start("", {
-      model: "haiku",
+      model: "claude-haiku-4-5",
       timeout: GENEROUS_REQUEST_TIMEOUT_MS,
     });
     const rootPid = trackManagerProcess(subprocess, cleanupPids);
@@ -152,7 +152,7 @@ describe("Windows process-tree termination", { skip: WINDOWS_ONLY }, () => {
     subprocess.on("error", () => {});
 
     await subprocess.start("", {
-      model: "haiku",
+      model: "claude-haiku-4-5",
       timeout: GENEROUS_REQUEST_TIMEOUT_MS,
     });
     const rootPid = trackManagerProcess(subprocess, cleanupPids);

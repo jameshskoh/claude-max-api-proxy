@@ -9,7 +9,7 @@ The CLI runs in `--print` mode. It takes one prompt, writes its output and exits
 
 ## Decision
 
-Each request creates a new `ClaudeSubprocess` and spawns `claude` (`src/server/routes.ts:83`). There is no pool, no queue and no concurrency limit. Details:
+Each request creates a new `ClaudeSubprocess` and spawns `claude` (`src/server/routes.ts:95`). There is no pool, no queue and no concurrency limit. Details:
 
 - `spawn()` runs with `shell: false` on macOS and Linux, so no shell parses the arguments. The Windows fallback uses `shell: true` when it cannot resolve the `.exe` (`manager.ts:136-146`).
 - The prompt goes to stdin, not argv, to avoid `E2BIG` on large inputs (`manager.ts:240-242`).
@@ -22,11 +22,11 @@ Each request creates a new `ClaudeSubprocess` and spawns `claude` (`src/server/r
 ## Consequences
 
 - **Good:** Runs are simple to reason about. A failed run ends with its own request. Apart from the session map, no state is shared between runs. Resume avoids replaying history ([resume-cli-sessions-keyed-by-user.md](resume-cli-sessions-keyed-by-user.md)).
-- **Bad:** Each request pays a cold start (CLI boot and system prompt). Concurrent processes are unbounded. A streaming client that disconnects kills the CLI (`routes.ts:152-156`). A non-streaming client that disconnects does not, because that path has no close handler (`routes.ts:358`), so the CLI keeps running. Every run skips permission prompts.
+- **Bad:** Each request pays a cold start (CLI boot and system prompt). Concurrent processes are unbounded. A streaming client that disconnects kills the CLI (`routes.ts:164-168`). A non-streaming client that disconnects does not, because that path has no close handler (`routes.ts:365`), so the CLI keeps running. Every run skips permission prompts.
 
 ## Where in the code
 
-- `src/server/routes.ts:60-105`: `handleChatCompletions` creates the subprocess and picks streaming or non-streaming.
+- `src/server/routes.ts:60-117`: `handleChatCompletions` creates the subprocess and picks streaming or non-streaming.
 - `src/subprocess/manager.ts:194-291`: `start()` sets cwd, env, shell flag and the stdin write.
 - `src/subprocess/manager.ts:136-146`: `resolveClaudeBin()` chooses the shell flag.
 - `src/subprocess/manager.ts:295-324`: `buildArgs()`, including resume and session flags.

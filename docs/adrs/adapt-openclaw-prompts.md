@@ -30,8 +30,8 @@ Two parts.
 
 - `src/subprocess/manager.ts:50-92`: `OPENCLAW_TOOL_MAPPING_PROMPT`.
 - `src/subprocess/manager.ts:305-306`: appends the mapping prompt on every request.
-- `src/adapter/openai-to-cli.ts:73-100`: `stripOpenClawTooling`, with the four headings and the regex.
-- `src/adapter/openai-to-cli.ts:116-120`: applies the strip to `system` messages only.
+- `src/adapter/openai-to-cli.ts:78-105`: `stripOpenClawTooling`, with the four headings and the regex.
+- `src/adapter/openai-to-cli.ts:121-125`: applies the strip to `system` messages only.
 
 ## Revisit when
 

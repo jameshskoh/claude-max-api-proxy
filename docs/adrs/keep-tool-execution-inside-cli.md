@@ -28,10 +28,10 @@
 
 ## Where in the code
 
-- `src/server/routes.ts:107-113`: `toOpenAICallId`. Used only in the disabled block.
-- `src/server/routes.ts:206-275`: disabled streaming handlers for tool events.
-- `src/server/routes.ts:365-383`: disabled non-streaming accumulator for `tool_use` blocks.
-- `src/adapter/cli-to-openai.ts:65-106`: `cliResultToOpenai` with an optional `toolCalls` argument that no caller passes.
+- `src/server/routes.ts:119-125`: `toOpenAICallId`. Used only in the disabled block.
+- `src/server/routes.ts:218-287`: disabled streaming handlers for tool events.
+- `src/server/routes.ts:372-390`: disabled non-streaming accumulator for `tool_use` blocks.
+- `src/adapter/cli-to-openai.ts:65-102`: `cliResultToOpenai` with an optional `toolCalls` argument that no caller passes.
 - `src/types/openai.ts:28-45`: `OpenAIToolCall` and `OpenAIToolCallChunk` types.
 - `src/subprocess/manager.ts:346-356`: still emits the tool events that no handler reads.
 - `src/subprocess/manager.ts:297-298`: `--print` with `--dangerously-skip-permissions`.

@@ -5,7 +5,7 @@ This page traces what happens at runtime: startup, each request, the CLI child p
 - For the static module layout, see [ARCHITECTURE.md](ARCHITECTURE.md).
 - For why each choice was made, see the [ADR index](adrs/README.md).
 
-Line numbers are as of commit `2074263`. Re-check them if the code has moved.
+Line numbers were last updated on 2026-11-23. Re-check them if the code has moved.
 
 ## 1. Startup
 
@@ -30,7 +30,7 @@ flowchart TD
 
 **Plugin path (not how the service runs today)**
 
-`src/index.ts` exports a plugin object. Its `register` (`src/index.ts:76`) registers a provider. The provider's `auth.run` (`src/index.ts:94-188`) repeats the CLI and auth checks, asks for a port, calls `startServer` (`:137`), and returns a config that points the host at `http://127.0.0.1:<port>/v1`. The plugin's unload hook stops the server (`:194-200`). Nothing in the LaunchAgent setup uses this path.
+`src/index.ts` exports a plugin object. Its `register` (`src/index.ts:73`) registers a provider. The provider's `auth.run` (`src/index.ts:91-185`) repeats the CLI and auth checks, asks for a port, calls `startServer` (`:134`), and returns a config that points the host at `http://127.0.0.1:<port>/v1`. The plugin's unload hook stops the server (`:191-197`). Nothing in the LaunchAgent setup uses this path.
 
 ## 2. Request pipeline
 
@@ -42,10 +42,11 @@ Each HTTP request passes these steps in order.
 4. **Routing** (`:74-76`): `GET /health`, `GET /v1/models`, `POST /v1/chat/completions`. Anything else gets a JSON 404 (`:79-87`).
 5. **`handleChatCompletions`** (`src/server/routes.ts:60`). Makes a 24-character request ID (`:64`). `stream` is true only when `body.stream === true` (`:66`).
 6. **Validation** (`routes.ts:70-79`). `messages` must be a non-empty array, otherwise 400 `invalid_messages`.
-7. **Session resolution** (`resolveCliInput`, `routes.ts:30-53`). Returns the prompt, the session ID, and whether to resume. See section 5.
-8. **New subprocess** (`routes.ts:83`). One `ClaudeSubprocess` per request. See [spawn-one-cli-process-per-request](adrs/spawn-one-cli-process-per-request.md).
-9. **Branch** (`routes.ts:86-90`). `stream: true` goes to `handleStreamingResponse`. Otherwise `handleNonStreamingResponse` runs.
-10. **Outer catch** (`routes.ts:91-104`). A synchronous throw becomes a 500, unless headers were already sent.
+7. **Model check** (`routes.ts:81-91`). `extractModel` must accept `body.model` (a supported ID, with an optional `claude-code-cli/` or `claude-max/` prefix). Otherwise 404 `model_not_found`, with the supported IDs in the message. This runs before any CLI call, so no quota is used.
+8. **Session resolution** (`resolveCliInput`, called at `routes.ts:94`, defined at `routes.ts:30-53`). Returns the prompt, the session ID, and whether to resume. See section 5.
+9. **New subprocess** (`routes.ts:95`). One `ClaudeSubprocess` per request. See [spawn-one-cli-process-per-request](adrs/spawn-one-cli-process-per-request.md).
+10. **Branch** (`routes.ts:98-102`). `stream: true` goes to `handleStreamingResponse`. Otherwise `handleNonStreamingResponse` runs.
+11. **Outer catch** (`routes.ts:103-116`). A synchronous throw becomes a 500, unless headers were already sent.
 
 **Gotchas**
 
@@ -57,7 +58,7 @@ Each HTTP request passes these steps in order.
 `ClaudeSubprocess` (`src/subprocess/manager.ts:194`) extends `EventEmitter`. Its steps:
 
 1. **`start(prompt, options)`** (`manager.ts:203`). With `DEBUG_SUBPROCESS` set, logs the args and the first 200 characters of the prompt (`:206-209`).
-2. **`buildArgs`** (`:295-324`). Always passes `--print --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages --model <alias> --append-system-prompt <tool mapping>`. Then one session flag:
+2. **`buildArgs`** (`:295-324`). Always passes `--print --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages --model <full model ID> --append-system-prompt <tool mapping>`. The model ID is passed unchanged (see [pass-full-model-ids-to-cli](adrs/pass-full-model-ids-to-cli.md)). Then one session flag:
    - `--resume <id>` when resuming;
    - `--session-id <id>` for a new keyed session;
    - `--no-session-persistence` when the request has no `user`.
@@ -74,16 +75,16 @@ Each HTTP request passes these steps in order.
 | Event | Fires when | Listener in routes | Effect |
 |---|---|---|---|
 | `message` | Every parsed JSON line (`manager.ts:339`) | none | none |
-| `text_block_start` | `content_block_start` with a text block (`:341-344`) | streaming, `routes.ts:162` | Writes a `"\n\n"` chunk if text was already sent |
-| `tool_use_start` | `content_block_start` with a tool_use block (`:346-348`) | none, tool forwarding disabled (`routes.ts:212`) | none |
-| `input_json_delta` | `content_block_delta` of type input_json_delta (`:350-352`) | none, disabled (`routes.ts:244`) | none |
-| `content_block_stop` | `content_block_stop` (`:354-356`) | none, disabled (`routes.ts:270`) | none |
-| `content_delta` | `content_block_delta` with text_delta (`:358-360`) | streaming, `routes.ts:182` | Writes an SSE chunk |
-| `assistant` | Full assistant message, not a delta (`:361-362`) | streaming, `routes.ts:278` (sets model name); non-streaming listener disabled (`routes.ts:370`) | Model name only |
-| `result` | Result message (`:363-364`) | streaming `routes.ts:282`, non-streaming `routes.ts:385` | Ends the response |
+| `text_block_start` | `content_block_start` with a text block (`:341-344`) | streaming, `routes.ts:174` | Writes a `"\n\n"` chunk if text was already sent |
+| `tool_use_start` | `content_block_start` with a tool_use block (`:346-348`) | none, tool forwarding disabled (`routes.ts:224`) | none |
+| `input_json_delta` | `content_block_delta` of type input_json_delta (`:350-352`) | none, disabled (`routes.ts:256`) | none |
+| `content_block_stop` | `content_block_stop` (`:354-356`) | none, disabled (`routes.ts:282`) | none |
+| `content_delta` | `content_block_delta` with text_delta (`:358-360`) | streaming, `routes.ts:194` | Writes an SSE chunk |
+| `assistant` | Full assistant message, not a delta (`:361-362`) | none | none |
+| `result` | Result message (`:363-364`) | streaming `routes.ts:289`, non-streaming `routes.ts:392` | Ends the response |
 | `raw` | A line that does not parse (`:366-368`) | none | none |
-| `error` | Timeout only (`:404`) | streaming `routes.ts:305`, non-streaming `routes.ts:389` | Error reply |
-| `close` | Child process exits (`:280`) | streaming `routes.ts:323`, non-streaming `routes.ts:404` | Ends the response if not already ended |
+| `error` | Timeout only (`:404`) | streaming `routes.ts:312`, non-streaming `routes.ts:396` | Error reply |
+| `close` | Child process exits (`:280`) | streaming `routes.ts:330`, non-streaming `routes.ts:411` | Ends the response if not already ended |
 
 **Notes**
 
@@ -116,24 +117,25 @@ sequenceDiagram
   R->>S: start(prompt, sessionId, resume)
   S->>CLI: spawn, prompt on stdin
   CLI-->>S: stream-json lines
-  S-->>R: result, stored in finalResult (routes.ts:385-387)
+  S-->>R: result, stored in finalResult (routes.ts:392-394)
   CLI-->>S: exit
   S-->>R: close with code
   alt result was stored
-    R->>R: setSession if keyed (routes.ts:406-408)
-    R-->>C: 200 JSON from cliResultToOpenai (routes.ts:409)
+    R->>R: setSession if keyed (routes.ts:413-415)
+    R-->>C: 200 JSON from cliResultToOpenai, model is the requested ID (routes.ts:416)
   else no result
-    R->>R: clearSession if resuming (routes.ts:411-413)
-    R-->>C: 500 exited without response (routes.ts:414-421)
+    R->>R: clearSession if resuming (routes.ts:418-420)
+    R-->>C: 500 exited without response (routes.ts:421-428)
   end
-  Note over S,R: error event (timeout only) clears the session if resuming and sends 500 (routes.ts:389-402)
-  Note over R: headersSent check stops a second reply after a timeout (routes.ts:414)
+  Note over S,R: error event (timeout only) clears the session if resuming and sends 500 (routes.ts:396-409)
+  Note over R: headersSent check stops a second reply after a timeout (routes.ts:421)
 ```
 
 **Notes**
 
 - There is no client-disconnect handler in this path. If the client leaves, the CLI runs until it exits or times out (inferred).
 - Non-streaming does not use `assistant` events. The response is built from the `result` message alone.
+- The reply's `model` is the requested ID (`routes.ts:416`), not a name reported by the CLI.
 
 ### 4.2 Streaming
 
@@ -144,20 +146,18 @@ sequenceDiagram
   participant S as ClaudeSubprocess
   participant CLI as claude CLI
   C->>R: POST with stream set to true
-  R-->>C: SSE headers, flushHeaders, comment line :ok (routes.ts:131-141)
-  R->>S: start(prompt, sessionId, resume) (routes.ts:344)
+  R-->>C: SSE headers, flushHeaders, comment line :ok (routes.ts:143-153)
+  R->>S: start(prompt, sessionId, resume) (routes.ts:351)
   CLI-->>S: content_block_start for text
   S-->>R: text_block_start
-  R-->>C: separator chunk, only if text was already sent (routes.ts:162-179)
+  R-->>C: separator chunk, only if text was already sent (routes.ts:174-191)
   CLI-->>S: text_delta
   S-->>R: content_delta
-  R-->>C: chunk, role assistant on the first one (routes.ts:182-204)
-  CLI-->>S: assistant message
-  S-->>R: assistant, sets model name only (routes.ts:278-280)
+  R-->>C: chunk, role assistant on the first one (routes.ts:194-216)
   CLI-->>S: result
   S-->>R: result
-  R->>R: isComplete true, setSession (routes.ts:283-286)
-  R-->>C: done chunk with usage, then DONE marker, then end (routes.ts:287-301)
+  R->>R: isComplete true, setSession (routes.ts:290-293)
+  R-->>C: done chunk with usage, then DONE marker, then end (routes.ts:294-308)
 ```
 
 **Wire output (abbreviated, 4 lines; real output has a blank line after each event)**
@@ -171,16 +171,16 @@ data: [DONE]
 
 **Branches**
 
-- **Client disconnects before completion** (`routes.ts:152-158`): `res` `close` calls `subprocess.kill()` and resolves. The code uses `res` rather than `req` because `req` closes once the body is read (comment at `routes.ts:118-121`).
-- **Child exits non-zero with no result** (`routes.ts:323-339`): clears the session if resuming, writes an error line `Process exited with code <n>`, then `[DONE]`, then ends. A null code (killed by signal) also takes this path.
+- **Client disconnects before completion** (`routes.ts:164-170`): `res` `close` calls `subprocess.kill()` and resolves. The code uses `res` rather than `req` because `req` closes once the body is read (comment at `routes.ts:130-133`).
+- **Child exits non-zero with no result** (`routes.ts:330-346`): clears the session if resuming, writes an error line `Process exited with code <n>`, then `[DONE]`, then ends. A null code (killed by signal) also takes this path.
 - **Child exits 0 with no result**: writes `[DONE]` and ends, with no error line (inferred from code).
-- **Timeout error** (`routes.ts:305-321`): clears the session if resuming, writes an error line, ends. No `[DONE]`.
+- **Timeout error** (`routes.ts:312-328`): clears the session if resuming, writes an error line, ends. No `[DONE]`.
 
 **Rules**
 
-- `lastModel` starts as `claude-sonnet-4` (`routes.ts:145`) and changes only on an `assistant` event. The assistant message normally follows the text deltas (inferred), so early chunks may name `claude-sonnet-4` no matter which model was requested.
+- Every chunk's `model` is the requested ID (`routes.ts:157`).
 - Tool activity is not forwarded. See [keep-tool-execution-inside-cli](adrs/keep-tool-execution-inside-cli.md).
-- Usage comes from `result.usage` (`routes.ts:289-297`). It is missing when the CLI omits it.
+- Usage comes from `result.usage` (`routes.ts:296-304`). It is missing when the CLI omits it.
 - Stream text is SSE through [stream-text-deltas-as-sse](adrs/stream-text-deltas-as-sse.md).
 
 ## 5. Session lifecycle
@@ -203,13 +203,13 @@ stateDiagram-v2
 **Rules**
 
 - **Stateless** (`routes.ts:48`, `manager.ts:318-320`): `--no-session-persistence`, full history every turn.
-- **New keyed session** (`routes.ts:48-51`): a new UUID is used as the session ID, sent with `--session-id`. The full history is sent. `setSession(key, id, messages.length)` runs only after a `result` (`routes.ts:284-286`, `:406-408`).
-- **Resumed turn** (`routes.ts:39-46`): `openaiToCliDelta` (`src/adapter/openai-to-cli.ts:154-169`) keeps only messages at or after the stored `messageCount` and drops assistant messages. The request uses `--resume`.
-- **Empty delta**: if no new non-assistant message exists, the full history is sent with `--resume` (`openai-to-cli.ts:158-166`). That can duplicate content in the resumed session.
-- **Self-heal**: any failure while resuming calls `clearSession` (`routes.ts:309-311`, `:325-328`, `:391-393`, `:411-413`). The next turn starts a new session with the full history.
+- **New keyed session** (`routes.ts:48-51`): a new UUID is used as the session ID, sent with `--session-id`. The full history is sent. `setSession(key, id, messages.length)` runs only after a `result` (`routes.ts:291-293`, `:413-415`).
+- **Resumed turn** (`routes.ts:39-46`): `openaiToCliDelta` (`src/adapter/openai-to-cli.ts:159-174`) keeps only messages at or after the stored `messageCount` and drops assistant messages. The request uses `--resume`.
+- **Empty delta**: if no new non-assistant message exists, the full history is sent with `--resume` (`openai-to-cli.ts:168-170`). That can duplicate content in the resumed session.
+- **Self-heal**: any failure while resuming calls `clearSession` (`routes.ts:316-318`, `:332-335`, `:398-400`, `:418-420`). The next turn starts a new session with the full history.
 - **TTL**: 6 hours (`session-store.ts:14`), measured from `lastUsed`. Only `setSession` updates `lastUsed`. `getSession` does not (`:34-42`). Expired entries are removed when read, and swept every 30 minutes (`:15`, `:32`). The sweep timer is `unref`'d.
 - **Restart**: the map starts empty. CLI transcripts stay under `~/.claude/projects/`. Nothing in the proxy deletes them.
-- **Client disconnect while resuming** clears the session, because the streaming `close` handler runs with `isComplete` false (`routes.ts:323-328`) (inferred from code).
+- **Client disconnect while resuming** clears the session, because the streaming `close` handler runs with `isComplete` false (`routes.ts:330-335`) (inferred from code).
 - **Overlapping requests** with the same `user` are not serialized. Both can `--resume` the same session (inferred, not tested).
 - `src/session/manager.ts` is a separate library-level session map. The routes do not use it.
 
@@ -234,17 +234,25 @@ npm start                              # node dist/server/standalone.js on port 
 node dist/server/standalone.js 3457    # custom port, 1 to 65535
 ```
 
-Manual checks. These call the real CLI and use subscription quota. `claude-haiku-4` keeps cost down:
+Manual checks. These call the real CLI and use subscription quota. `claude-haiku-4-5` keeps cost down:
 
 ```bash
 curl -s http://127.0.0.1:3456/health
 curl -s http://127.0.0.1:3456/v1/models
 curl -s http://127.0.0.1:3456/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"claude-haiku-4","user":"dev-1","messages":[{"role":"user","content":"Say hi"}]}'
+  -d '{"model":"claude-haiku-4-5","user":"dev-1","messages":[{"role":"user","content":"Say hi"}]}'
 curl -N http://127.0.0.1:3456/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"claude-haiku-4","stream":true,"messages":[{"role":"user","content":"Count to 3"}]}'
+  -d '{"model":"claude-haiku-4-5","stream":true,"messages":[{"role":"user","content":"Count to 3"}]}'
+```
+
+An unsupported model returns 404 `model_not_found` before the CLI runs, so this check costs no quota:
+
+```bash
+curl -s http://127.0.0.1:3456/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude-opus-4","messages":[{"role":"user","content":"hi"}]}'
 ```
 
 Use `curl -N` for streaming, or curl buffers the SSE output. Send a second request with the same `user` to exercise the resume path.
@@ -261,9 +269,10 @@ Both debug flags log prompt fragments. Keep them off in the LaunchAgent.
 ### Tests
 
 - `npm test` runs `node --test dist/**/*.test.js`. Build first (`npm run build`), because the tests run from `dist/`.
-- `src/e2e.test.ts` (`:1-40`) starts the real server on a random port and calls the real CLI with haiku. It prints a quota warning when it starts (`:17-20`) and allows 120 seconds per test (`:26`). **It uses subscription quota.**
+- `src/e2e.test.ts` (`:1-41`) starts the real server on a random port and calls the real CLI with `claude-haiku-4-5`. It prints a quota warning when it starts (`:18-21`) and allows 120 seconds per test (`:27`). **It uses subscription quota.**
 - `src/subprocess/manager.test.ts` (`:1-20`) tests Windows process-tree termination. It is skipped on other platforms (`:9`, `:14`).
-- **Glob caveat.** npm runs scripts with `sh`, and `**` without globstar acts like `*` there. Checked with `sh` in a scratch folder: `dist/**/*.test.js` matched only one folder level down, so the top-level `dist/e2e.test.js` is missed. `npm test` itself was not run. To run the e2e test, use `node --test dist/e2e.test.js`.
+- `src/adapter/openai-to-cli.test.ts` tests `extractModel` (prefix stripping, unsupported IDs). It needs no CLI and no quota. After `npm run build`, run it with `node --test dist/adapter/openai-to-cli.test.js`.
+- **Glob caveat.** npm runs scripts with `sh`, where `**` without globstar acts like `*`. Checked with `sh` in a scratch folder: `dist/**/*.test.js` matches `dist/adapter/openai-to-cli.test.js` and `dist/subprocess/manager.test.js`, but not the top-level `dist/e2e.test.js`. So `npm test` does not run the e2e test. To run it, use `node --test dist/e2e.test.js`.
 
 ### Running as a macOS LaunchAgent
 
