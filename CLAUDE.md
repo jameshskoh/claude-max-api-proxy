@@ -50,12 +50,11 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.openclaw.claude-max-
 launchctl list com.openclaw.claude-max-proxy
 ```
 
-## Architecture
+## Docs — read before scoping a task
 
-- `src/types/claude-cli.ts` - Claude CLI JSON streaming types and type guards
-- `src/types/openai.ts` - OpenAI-compatible API types
-- `src/adapter/openai-to-cli.ts` - Converts OpenAI requests to CLI input
-- `src/adapter/cli-to-openai.ts` - Converts CLI output to OpenAI responses
-- `src/subprocess/manager.ts` - Spawns and manages Claude CLI subprocesses
-- `src/server/routes.ts` - Express route handlers (streaming + non-streaming)
-- `src/server/standalone.js` - Server entry point
+- `docs/ARCHITECTURE.md` - Module map, interfaces (HTTP and CLI), the **Task → files** table, and sharp edges. Start here to decide which files a task touches.
+- `docs/WORKFLOW.md` - Runtime flows (startup, request, subprocess events, streaming, sessions, timeouts), dev loop, tests, LaunchAgent setup.
+- `docs/adrs/README.md` - Index of design decisions. Read the matching ADR before changing that behaviour.
+- `docs/security-review/` - Security, telemetry and malicious-code review of commit `3e88f2f`.
+
+Line references in these docs are as of commit `2074263`. If you change code they cite, update the references.

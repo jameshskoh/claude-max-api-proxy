@@ -31,7 +31,7 @@ Method: one broad vulnerability sweep, then a separate false-positive check for 
   3. `messages[].content` becomes the prompt word for word (`src/adapter/openai-to-cli.ts:108-141`) and goes to the CLI's stdin.
   4. The CLI runs Bash, Read, Write and WebFetch without asking for approval.
   5. The output comes back as JSON (`routes.ts:372-378`). The `*` header lets the page read it.
-  6. Only `messages` is required (`routes.ts:70-79`); `model` defaults to opus.
+  6. The page needs only `messages` and any `model` string (`routes.ts:70-79`). An unknown `model` runs opus; a missing one makes `extractModel` throw, which returns 500.
 - **Impact:** a malicious or compromised site can read files such as `~/.ssh` keys, change shell rc files, send data out, and use up your subscription.
 - **Reach:** the CLI runs in `process.cwd()` (`manager.ts:216`), which is `/` under launchd unless the plist sets one. Absolute paths work anyway, so the reach is your whole user account.
 - **What limits it:** newer Chrome versions block or prompt before a public site can reach localhost, and this server never sends the `Access-Control-Allow-Private-Network` header Chrome asks for. Safari and Firefox enforce this less consistently. DNS rebinding works because `Host` is never checked. **Not tested in a browser.**
@@ -57,7 +57,7 @@ Method: one broad vulnerability sweep, then a separate false-positive check for 
 | `src/adapter/openai-to-cli.ts:40-51` | The `MODEL_MAP` lookup isn't protected against prototype keys: `model: "constructor"` puts a non-string into the CLI arguments. It can't inject flags (one argument, `shell:false`). Fix with `Object.hasOwn`. |
 | `src/subprocess/manager.ts:140` | The Windows fallback uses `shell:true` and joins arguments without quoting. It isn't exploitable today, because every argument is set by the server, but any future argument taken from a request would allow command injection. Doesn't apply on macOS. |
 | `src/subprocess/manager.ts:454-464` | `verifyAuth` always returns ok, so the server starts even when you're logged out of Claude. |
-| `src/server/routes.ts:65` | A JSON `null` body throws outside `try`, causing an unhandled rejection that ends the process. launchd restarts it (availability only). |
+| `src/server/routes.ts:66` | A JSON `null` body throws outside `try`, causing an unhandled rejection that ends the process. launchd restarts it (availability only). |
 | `docs/macos-setup.md:33-37` | Logs go to `/tmp`, where other local users can read them. |
 | `README.md:220-225` | The "Security" section doesn't mention the lack of auth, the CORS `*` or the skipped permissions. It also says prompts are passed as CLI arguments, which is out of date; they go through stdin. |
 

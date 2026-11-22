@@ -43,7 +43,7 @@ Two items need care. They are not malicious, but they are dangerous by design, a
 - **History:** it was added in `bbeb4c7` and has not changed since.
 - **The proxy itself never runs any `openclaw` binary.**
 - **Verdict:** **benign but risky.**
-  - If `openclaw` is not installed, the prompt adds about 1.5 KB to each request, and any `openclaw` command the model tries simply fails.
+  - If `openclaw` is not installed, the prompt adds about 2.5 KB (2,473 bytes) to each request, and any `openclaw` command the model tries simply fails.
   - If `openclaw` is installed, instructions hidden in a prompt could use messaging, cron or remote nodes without approval.
 
 ### 3. Supply chain

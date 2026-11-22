@@ -1,6 +1,6 @@
 /**
  * Types for Claude Code CLI JSON streaming output
- * Based on research from PROTOCOL.md
+ * Protocol notes: docs/ARCHITECTURE.md (Interfaces / APIs)
  */
 
 export interface ClaudeCliInit {
