@@ -245,7 +245,7 @@ None of these can be set per request.
 
 ### Outbound to the CLI
 
-**Spawn.** One child per request, run in the proxy's working directory, with the proxy's environment minus `CLAUDECODE`, piped stdio, and no shell. A shell is used only by the Windows shim fallback.
+**Spawn.** One child per request, run in a fixed folder under the OS temp directory (created if missing) rather than the proxy's own directory, so the CLI does not load the repo's project context. The child gets the proxy's environment minus `CLAUDECODE`, piped stdio, and no shell. A shell is used only by the Windows shim fallback.
 
 **Arguments**, in order:
 

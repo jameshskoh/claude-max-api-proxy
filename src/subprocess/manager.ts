@@ -8,7 +8,8 @@
 import { spawn, spawnSync, ChildProcess } from "child_process";
 import { EventEmitter } from "events";
 import fs from "fs/promises";
-import { readFileSync } from "fs";
+import { mkdirSync, readFileSync } from "fs";
+import os from "os";
 import path from "path";
 import type {
   ClaudeCliMessage,
@@ -191,6 +192,21 @@ function killProcessTree(
   }
 }
 
+/**
+ * Default working directory for the Claude CLI subprocess.
+ *
+ * A folder outside any project means no project CLAUDE.md or git state loads.
+ * It is fixed rather than random because the CLI looks up sessions by working
+ * directory, so `--resume` must run from the same folder as the first turn.
+ * The folder is recreated on every call because the OS may clean the temp
+ * directory.
+ */
+export function defaultCliCwd(): string {
+  const dir = path.join(os.tmpdir(), "claude-max-proxy");
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 export class ClaudeSubprocess extends EventEmitter {
   private process: ChildProcess | null = null;
   private buffer: string = "";
@@ -213,7 +229,7 @@ export class ClaudeSubprocess extends EventEmitter {
         // Use spawn() for security - no shell interpretation
         const { bin, shell } = resolveClaudeBin();
         this.process = spawn(bin, args, {
-          cwd: options.cwd || process.cwd(),
+          cwd: options.cwd || defaultCliCwd(),
           env: Object.fromEntries(
             Object.entries(process.env).filter(([k]) => k !== "CLAUDECODE")
           ),
