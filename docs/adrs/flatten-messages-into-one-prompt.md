@@ -5,35 +5,49 @@
 
 ## Context
 
-`--print` mode takes one prompt, not a message list (`src/adapter/openai-to-cli.ts:107-112`). Old `PROTOCOL.md` proposed `--input-format stream-json` with `{"type": "user_message"}` lines. That section is marked TODO and was never verified (old `PROTOCOL.md:139-145`).
-
-Old `DESIGN.md` showed `[System]:` and `[Previous response]:` prefixes (old `DESIGN.md:326`, `331`). The code used XML-like tags from the first commit, so the prefix format never shipped.
+- `--print` mode takes one prompt, not a message list.
+- Old `PROTOCOL.md` proposed `--input-format stream-json` with `{"type": "user_message"}` lines. That section is marked TODO and was never verified.
+- Old `DESIGN.md` showed `[System]:` and `[Previous response]:` prefixes. The code used XML-like tags from the first commit, so the prefix format never shipped.
 
 ## Decision
 
-`messagesToPrompt` joins all messages with a newline (`openai-to-cli.ts:113-140`):
+All messages are joined with a newline into one prompt:
 
-- `system` becomes `<system>...</system>`, after OpenClaw tooling sections are stripped (`openai-to-cli.ts:85-105`).
+- `system` becomes `<system>...</system>`, after OpenClaw tooling sections are stripped.
 - `user` is raw text.
 - `assistant` becomes `<previous_response>...</previous_response>`.
 - `tool` is dropped.
 
-Content arrays keep only `text` and `input_text` blocks (`openai-to-cli.ts:65-76`). Images are dropped without an error. The joined string goes to stdin (`manager.ts:240-242`).
+For example:
 
-On resume, assistant messages are dropped, because the CLI already holds them (`openai-to-cli.ts:159-174`).
+```
+<system>
+You are helpful.
+</system>
+
+What is 2+2?
+<previous_response>
+4
+</previous_response>
+
+And times 3?
+```
+
+Content arrays keep only `text` and `input_text` blocks. Images are dropped without an error. The joined string goes to the CLI on stdin.
+
+On resume, assistant messages are dropped, because the CLI already holds them.
 
 ## Consequences
 
 - **Good:** Works with the CLI's single-prompt mode. No stream-json protocol to get right. Stdin avoids `E2BIG`.
-- **Bad:** Earlier turns are text the model did not write, so multi-turn is weaker than real turns. Message text can imitate the tags, so a user can inject a fake `<system>` block. Images and tool messages are lost silently. Session resume reduces the multi-turn problem for clients that send `user` ([resume-cli-sessions-keyed-by-user.md](resume-cli-sessions-keyed-by-user.md)).
+- **Bad:**
+  - Earlier turns are text the model did not write, so multi-turn is weaker than real turns. Session resume reduces this for clients that send `user` ([resume-cli-sessions-keyed-by-user](resume-cli-sessions-keyed-by-user.md)).
+  - Message text can imitate the tags, so a user can inject a fake `<system>` block.
+  - Images and tool messages are lost silently.
 
-## Where in the code
+## Affected components
 
-- `src/adapter/openai-to-cli.ts:65-76`: `extractText`, keeps text blocks only.
-- `src/adapter/openai-to-cli.ts:85-105`: `stripOpenClawTooling`.
-- `src/adapter/openai-to-cli.ts:113-140`: `messagesToPrompt`, role mapping.
-- `src/adapter/openai-to-cli.ts:159-174`: `openaiToCliDelta`, drops assistant turns on resume.
-- `src/subprocess/manager.ts:240-242`: prompt written to stdin.
+The request adapter, which extracts text from content blocks, maps roles to tags and builds the delta prompt on resume, and the subprocess manager, which writes the prompt to stdin.
 
 ## Revisit when
 

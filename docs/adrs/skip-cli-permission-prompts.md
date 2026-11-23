@@ -5,30 +5,28 @@
 
 ## Context
 
-- Every request runs the `claude` CLI in `--print` mode (`src/subprocess/manager.ts:292-324`).
+- Every request runs the `claude` CLI in `--print` mode.
 - `--print` has no terminal. Nobody is there to answer a permission prompt, so a tool call would block until timeout or fail.
 - The OpenClaw integration needs the CLI to run tools (Bash, Read, Write, WebFetch) on its own.
 
 ## Decision
 
-- Always pass `--dangerously-skip-permissions` (`src/subprocess/manager.ts:298`).
+- Always pass `--dangerously-skip-permissions`.
 - No environment variable, config option or request field changes this.
-- The code uses no `--allowedTools`, `--disallowedTools`, `--permission-mode` or `--add-dir` flags.
+- The proxy passes no `--allowedTools`, `--disallowedTools`, `--permission-mode` or `--add-dir` flags.
 
 ## Consequences
 
 - **Good:** tool calls work with no terminal and no approval step. Clients need no changes.
 - **Bad:**
   - The model can run Bash, Write, Edit, WebFetch and WebSearch without asking, with your user account's rights.
-  - The CLI starts in `process.cwd()` (`src/subprocess/manager.ts:216`). Under launchd that is `/` unless the plist sets `WorkingDirectory`. Absolute paths reach the rest of the account anyway.
-  - With no auth and CORS `*` (see `localhost-only-no-auth-open-cors.md`), a web page may be able to run commands on your machine. This is the main risk in item 1 of `docs/security-review/bad-coding-practices.md`.
+  - The CLI starts in the proxy's working directory. Under launchd that is `/` unless the plist sets `WorkingDirectory`. Absolute paths reach the rest of the account anyway.
+  - With no auth and CORS `*` ([localhost-only-no-auth-open-cors](localhost-only-no-auth-open-cors.md)), a web page may be able to run commands on your machine. This is the main risk in item 1 of the [bad-coding-practices review](../security-review/bad-coding-practices.md).
   - The README security section does not mention this flag.
 
-## Where in the code
+## Affected components
 
-- `src/subprocess/manager.ts:292-324`: `buildArgs()`, which builds the CLI argument list.
-- `src/subprocess/manager.ts:298`: the flag.
-- `src/subprocess/manager.ts:216`: the working directory and environment passed to the CLI.
+The subprocess manager: argument building, and the working directory and environment it gives the CLI.
 
 ## Revisit when
 

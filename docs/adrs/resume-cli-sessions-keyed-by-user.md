@@ -12,11 +12,11 @@
 ## Decision
 
 - Use the OpenAI `user` field as the session key.
-- First turn: pass a new UUID as `--session-id`. On any `result` event, save `{claudeSessionId, messageCount: messages.length, lastUsed}`. This happens even when `is_error` is true.
-- Later turns: pass `--resume <id>` and send only messages after `messageCount`. Assistant messages are dropped, because the CLI already generated them.
+- First turn: pass a new UUID as `--session-id`. On any `result` event, save the CLI session ID, the current message count and a last-used time. This happens even when `is_error` is true.
+- Later turns: pass `--resume <id>` and send only messages after the saved message count. Assistant messages are dropped, because the CLI already generated them.
 - No `user`: pass `--no-session-persistence`. There is no shared fallback key.
 - Resume failure (error or abnormal exit) clears the entry, so the next turn sends full history to a new session.
-- Store: in-memory `Map`. Entries expire 6 hours after `lastUsed`; an unref'd timer sweeps every 30 minutes.
+- Store: in process memory. Entries expire 6 hours after last use; an `unref`'d timer sweeps every 30 minutes.
 
 ## Consequences
 
@@ -27,20 +27,13 @@
   - The map is lost on restart. Transcripts stay under `~/.claude/projects/`, but the proxy cannot find them.
   - Two concurrent requests with the same `user` race on one session.
   - An edited or shortened history gives an empty delta. The code then sends the full history into the resumed session.
-  - Changes to messages before `messageCount`, such as a new system prompt, are never sent.
+  - Changes to messages before the saved count, such as a new system prompt, are never sent.
   - Two clients sending the same `user` value share a session.
-  - `src/session/manager.ts` is a legacy file store that the server does not use. It is easy to confuse with `session-store.ts`.
+  - The legacy session manager is a file store that the server does not use. It is easy to confuse with the session store.
 
-## Where in the code
+## Affected components
 
-- `src/server/routes.ts:30-53`: `resolveCliInput` picks resume or first turn from `body.user`.
-- `src/server/routes.ts:289-310`: streaming `result` handler saves the session.
-- `src/server/routes.ts:312-348`: streaming error and close handlers clear a failed resume.
-- `src/server/routes.ts:392-432`: non-streaming handlers save on success and clear on failure.
-- `src/subprocess/session-store.ts:1-54`: in-memory map, TTL, 30-minute sweep, get, set and clear.
-- `src/adapter/openai-to-cli.ts:153-174`: `openaiToCliDelta` keeps messages after `messageCount` and drops assistant turns.
-- `src/subprocess/manager.ts:310-321`: chooses `--resume`, `--session-id` or `--no-session-persistence`.
-- `src/session/manager.ts`: legacy file store. Only re-exported from `src/index.ts:240`.
+Session resolution and the result, error and close listeners in both response paths of the request handlers; the session store; the request adapter's delta prompt; and the subprocess manager, which picks the session flag. The legacy session manager is only re-exported by the plugin entry.
 
 ## Revisit when
 

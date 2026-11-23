@@ -10,36 +10,26 @@ The CLI's `--model` takes a full model name as well as an alias. Clients name a 
 
 ## Decision
 
-- `SUPPORTED_MODELS` in `openai-to-cli.ts` is the only list of accepted IDs.
-- The prefixes `claude-code-cli/` and `claude-max/` are stripped. The ID is kept only if it is in the list. The lookup is an array `includes`, so it is prototype-safe.
+- One list of supported IDs is the only source of accepted models.
+- The prefixes `claude-code-cli/` and `claude-max/` are stripped. The ID is kept only if it is in the list. The check is a plain list lookup, so names such as `constructor` cannot slip through.
 - The full ID is passed to `--model` unchanged.
 - A missing or unsupported `model` returns HTTP 404 with `code: "model_not_found"` and `param: "model"`. The message lists every supported ID.
-- `GET /v1/models` lists the same list.
+- `GET /v1/models` returns the same list.
 - The response `model` is the requested ID, prefix removed, on streaming chunks and non-streaming responses.
 
 ## Consequences
 
 - **Good:**
   - Each ID runs the model it names.
-  - An unsupported ID fails loudly, with the list of valid IDs.
+  - An unsupported ID fails loudly, with the list of valid IDs, before any CLI call.
   - One list feeds validation, `/v1/models` and the e2e test.
-  - The lookup is prototype-safe.
 - **Bad:**
-  - When the CLI adds or retires a model, `SUPPORTED_MODELS` must be edited and re-checked against the CLI.
-  - The plugin's `AVAILABLE_MODELS` is a separate list.
+  - When the CLI adds or retires a model, the list must be edited and the ID re-checked against the CLI.
+  - The plugin's advertised models are a separate list.
 
-## Where in the code
+## Affected components
 
-- `src/adapter/openai-to-cli.ts:11-25`: `SUPPORTED_MODELS` and `SupportedModel`.
-- `src/adapter/openai-to-cli.ts:38-46`: `extractModel`, which strips prefixes and checks the list.
-- `src/adapter/openai-to-cli.ts:51-57`: `requireModel`, a safety net that throws on null.
-- `src/subprocess/manager.ts:303-304`: `--model` receives the full ID.
-- `src/server/routes.ts:81-91`: the 404 `model_not_found` check and its message.
-- `src/server/routes.ts:157`: `responseModel`, the requested ID on streaming chunks.
-- `src/server/routes.ts:416`: non-streaming response model.
-- `src/adapter/cli-to-openai.ts:68-102`: `cliResultToOpenai`.
-- `src/server/routes.ts:459-470`: `handleModels`, which lists `SUPPORTED_MODELS`.
-- `src/index.ts:18-34`: `AVAILABLE_MODELS`, the plugin's list.
+The request adapter, which holds the supported-model list and the check; request validation and the models endpoint in the request handlers; both response paths, which report the requested ID; the subprocess manager, which passes the ID to `--model`; and the plugin entry's advertised list.
 
 ## Revisit when
 

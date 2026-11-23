@@ -52,9 +52,7 @@ launchctl list com.openclaw.claude-max-proxy
 
 ## Docs — read before scoping a task
 
-- `docs/ARCHITECTURE.md` - Module map, interfaces (HTTP and CLI), the **Task → files** table, and sharp edges. Start here to decide which files a task touches.
+- `docs/ARCHITECTURE.md` - Component map (the one place that maps components to files), interfaces (HTTP and CLI), the **Task → components** table, and sharp edges. Start here to decide which components a task touches.
 - `docs/WORKFLOW.md` - Runtime flows (startup, request, subprocess events, streaming, sessions, timeouts), dev loop, tests, LaunchAgent setup.
-- `docs/adrs/README.md` - Index of design decisions. Read the matching ADR before changing that behaviour.
+- `docs/adrs/README.md` - Index and convention for design decisions. Read the matching ADR before changing that behaviour.
 - `docs/security-review/` - Security, telemetry and malicious-code review of commit `3e88f2f`.
-
-Line references in these docs were last updated on 2026-11-23. If you change code they cite, update the references.
