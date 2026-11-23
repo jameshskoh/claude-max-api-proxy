@@ -6,31 +6,27 @@
 ## Context
 
 - The proxy is a local helper for OpenAI-compatible clients on the same machine.
-- The original design assumed that binding to loopback was enough (old `DESIGN.md:768-774`).
-- The OpenClaw provider setup starts the server and gives clients a dummy key, `local` (`src/index.ts:146`, `src/index.ts:155`). The server never checks it.
+- The original design assumed that binding to loopback was enough (old `DESIGN.md`).
+- The OpenClaw provider setup starts the server and gives clients a dummy key, `local`. The server never checks it.
 
 ## Decision
 
-- Bind to `127.0.0.1` by default (`src/server/index.ts:108`).
+- Bind to `127.0.0.1` by default.
 - No auth on any route. Keys are accepted and ignored.
-- Send `Access-Control-Allow-Origin: *` on every response, and answer every OPTIONS request with 200 "for local development" (`src/server/index.ts:60-71`).
+- Send `Access-Control-Allow-Origin: *` on every response, and answer every OPTIONS request with 200 "for local development".
 - Do not check `Host` or `Origin`.
 
 ## Consequences
 
 - **Good:** clients need no setup. Any OpenAI-compatible SDK works with a dummy key, and browser-based tools can call the API directly.
 - **Bad:**
-  - Any local process or OS user that can reach port 3456 can use the API, which gives it a command line as you (see `skip-cli-permission-prompts.md`).
-  - Any website is likely able to send requests from your browser. CORS allows it, and DNS rebinding works because `Host` is never checked. Chrome's private-network-access rules block some of this, but this has not been tested in a browser. See item 1 of `docs/security-review/bad-coding-practices.md`.
-  - Error responses return the raw `err.message` to callers, which can include spawn errors and file paths (`src/server/index.ts:90-99`).
+  - Any local process or OS user that can reach port 3456 can use the API, which gives it a command line as you ([skip-cli-permission-prompts](skip-cli-permission-prompts.md)).
+  - Any website is likely able to send requests from your browser. CORS allows it, and DNS rebinding works because `Host` is never checked. Chrome's private-network-access rules block some of this, but this has not been tested in a browser. See item 1 of the [bad-coding-practices review](../security-review/bad-coding-practices.md).
+  - Error responses return the raw error message to callers, which can include spawn errors and file paths.
 
-## Where in the code
+## Affected components
 
-- `src/server/index.ts:108`: default host `127.0.0.1`.
-- `src/server/index.ts:60-71`: CORS headers and the OPTIONS handler.
-- `src/server/index.ts:74-76`: routes, with no auth middleware.
-- `src/server/index.ts:90-99`: error handler that returns `err.message`.
-- `src/index.ts:137-159`: provider setup. Starts the server and sends the dummy key `local`.
+The HTTP app (bind address, CORS headers, the OPTIONS handler, routing with no auth layer, and the error handler that returns the raw message) and the plugin entry's provider setup, which starts the server and hands out the dummy key.
 
 ## Revisit when
 

@@ -1,10 +1,16 @@
 # Architecture decision records
 
-Each record explains one design choice found in the code: why it was made, what it costs, and where it lives.
-Line references were last updated on 2026-11-23. Re-check them if the code has moved.
-"Old `DESIGN.md`", "old `PROTOCOL.md`" and "old root `ARCHITECTURE.md`" are planning notes removed after that commit. Read them with `git show 2074263:DESIGN.md`.
+Each record explains one design choice: why it was made, what it costs, and which components it touches.
+"Old `DESIGN.md`", "old `PROTOCOL.md`" and "old root `ARCHITECTURE.md`" are planning notes removed after commit `2074263`. Read them with `git show 2074263:DESIGN.md`.
 
-Start with `docs/ARCHITECTURE.md` for the map and `docs/WORKFLOW.md` for runtime flows. Come here when a task touches one of these choices.
+Start with [ARCHITECTURE.md](../ARCHITECTURE.md) for the map and [WORKFLOW.md](../WORKFLOW.md) for runtime flows. Come here when a task touches one of these choices.
+
+## Convention
+
+- **One ADR per decision, edited in place.** When a decision changes, rewrite its ADR to describe the current decision and update "Revised". Don't mark it superseded or write a replacement. Why: readers find today's decision without following a chain of stale records, and the old reasoning stays in Git history.
+- **Retired decisions are deleted**, together with their row below.
+- **Rename the file** when its name no longer describes the decision, and update the row and every link.
+- **Describe behaviour, not code locations.** No line numbers. Name components and public contracts (HTTP API, CLI flags, config) instead of files and functions.
 
 | Decision | One line | Touch it when you… |
 |---|---|---|
@@ -22,15 +28,16 @@ Start with `docs/ARCHITECTURE.md` for the map and `docs/WORKFLOW.md` for runtime
 
 ## Template
 
-```
-# <Title>
+```markdown
+# <Decision, stated as what we do>
 
-- **Status:** Accepted | Accepted, with known issues | Partly built | Partly reverted
-- **Introduced:** <commit, date, author>
+- **Status:** Accepted | Accepted, with known issues
+- **Introduced:** <commit>, <date>, <author>
+- **Revised:** <date>          (add or update on each in-place revision)
 
 ## Context
 ## Decision
 ## Consequences
-## Where in the code
+## Affected components
 ## Revisit when
 ```
