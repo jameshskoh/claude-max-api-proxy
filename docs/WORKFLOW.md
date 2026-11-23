@@ -60,7 +60,7 @@ The subprocess manager wraps one CLI child and reports what it does as events. I
    - `--resume <id>` when resuming;
    - `--session-id <id>` for a new keyed session;
    - `--no-session-persistence` when the request has no `user`.
-3. **Spawn.** Runs in the proxy's working directory, with the parent environment minus `CLAUDECODE` and piped stdio. No shell on macOS and Linux. The binary is `CLAUDE_BIN` if set, otherwise `claude` from PATH. On Windows it resolves to the bundled `.exe`. See [resolve-windows-exe-and-kill-process-tree](adrs/resolve-windows-exe-and-kill-process-tree.md).
+3. **Spawn.** Runs in a fixed folder under the OS temp directory, created if missing, so the CLI does not load the repo's project context. The environment is the parent's minus `CLAUDECODE`, with piped stdio. No shell on macOS and Linux. The binary is `CLAUDE_BIN` if set, otherwise `claude` from PATH. On Windows it resolves to the bundled `.exe`. See [resolve-windows-exe-and-kill-process-tree](adrs/resolve-windows-exe-and-kill-process-tree.md).
 4. **Arm timeout.** 15 minutes by default. The request handlers never pass a custom timeout.
 5. **Prompt on stdin.** The prompt is written and stdin is closed. Sending it on stdin avoids `E2BIG` on large inputs.
 6. **stdout.** Chunks are appended to a buffer, split on newlines, and the last partial line is kept for the next chunk. Each line is trimmed and parsed as JSON. Lines that do not parse are emitted as `raw`.
@@ -283,10 +283,10 @@ This section replaces the old `docs/macos-setup.md` (removed after commit `20742
 **Before loading**
 
 1. Build the repo: `npm run build`, so `dist/server/standalone.js` exists.
-2. Create the log and sandbox folders. launchd does not create the log folder, and the job will not start without it:
+2. Create the log folder. launchd does not create it, and the job will not start without it:
 
    ```bash
-   mkdir -p ~/.openclaw/logs ~/claude-proxy-sandbox
+   mkdir -p ~/.openclaw/logs
    ```
 
 3. Find the paths to fill into the plist:
@@ -314,10 +314,6 @@ This section replaces the old `docs/macos-setup.md` (removed after commit `20742
     <string>/Users/YOU/source/experiments/llm/claude-max-api-proxy/dist/server/standalone.js</string>
     <string>3456</string>
   </array>
-
-  <!-- Empty folder. The CLI runs in this directory, so it does not start in / or your home folder -->
-  <key>WorkingDirectory</key>
-  <string>/Users/YOU/claude-proxy-sandbox</string>
 
   <key>EnvironmentVariables</key>
   <dict>

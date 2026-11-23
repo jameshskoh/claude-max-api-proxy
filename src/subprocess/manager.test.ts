@@ -1,15 +1,22 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, afterEach, before, describe, it } from "node:test";
-import { ClaudeSubprocess } from "./manager.js";
+import { ClaudeSubprocess, defaultCliCwd } from "./manager.js";
 
 const WINDOWS_ONLY = process.platform !== "win32";
 const WAIT_TIMEOUT_MS = 5_000;
 const GENEROUS_REQUEST_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 100;
+
+it("defaultCliCwd returns a fixed temp folder that exists as a directory", async () => {
+  const dir = defaultCliCwd();
+  assert.equal(dir, path.join(tmpdir(), "claude-max-proxy"));
+  const info = await stat(dir);
+  assert.equal(info.isDirectory(), true);
+});
 
 describe("Windows process-tree termination", { skip: WINDOWS_ONLY }, () => {
   let fixtureDir: string;
