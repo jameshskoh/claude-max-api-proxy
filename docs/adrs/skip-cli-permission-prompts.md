@@ -2,27 +2,27 @@
 
 - **Status:** Accepted, with known issues
 - **Introduced:** bbeb4c7, 2026-02-08, Krzysztof Wende
-- **Revised:** 2026-11-23
+- **Revised:** 2026-11-25
 
 ## Context
 
 - Every request runs the `claude` CLI in `--print` mode.
 - `--print` has no terminal. Nobody is there to answer a permission prompt, so a tool call would block until timeout or fail.
-- The OpenClaw integration needs the CLI to run tools (Bash, Read, Write, WebFetch) on its own.
+- The CLI runs with no built-in tools (`--tools ""`), no MCP servers, and no CLAUDE.md, skills, plugins or hooks. It acts as a text-only model.
 
 ## Decision
 
-- Always pass `--dangerously-skip-permissions`.
+- Always pass `--dangerously-skip-permissions`. It is a guard: a stray tool or permission check can never block a headless run.
 - No environment variable, config option or request field changes this.
 - The proxy passes no `--allowedTools`, `--disallowedTools`, `--permission-mode` or `--add-dir` flags.
 
 ## Consequences
 
-- **Good:** tool calls work with no terminal and no approval step. Clients need no changes.
+- **Good:** A stray tool or permission check cannot block a run. Clients need no changes.
 - **Bad:**
-  - The model can run Bash, Write, Edit, WebFetch and WebSearch without asking, with your user account's rights.
-  - The CLI starts in a fixed folder under the OS temp directory, not the proxy's own. That limits the project context it loads, not what it can reach. Absolute paths reach the rest of the account anyway.
-  - With no auth and CORS `*` ([localhost-only-no-auth-open-cors](localhost-only-no-auth-open-cors.md)), a web page may be able to run commands on your machine. This is the main risk in item 1 of the [bad-coding-practices review](../security-review/bad-coding-practices.md).
+  - The flag lets any tool that does run proceed without asking, with your user account's rights. With no tools enabled, the model can only return text, so the risk is limited to what a text-only model can do. If built-in tools or MCP servers are turned on again, the flag applies to them too.
+  - The CLI starts in a fixed folder under the OS temp directory, not the proxy's own. That folder is not a sandbox: it only sets where session files go. If tools come back, absolute paths reach the rest of the account.
+  - With no auth and CORS `*` ([localhost-only-no-auth-open-cors](localhost-only-no-auth-open-cors.md)), a web page can use the proxy, but the model can only return text.
   - The README security section does not mention this flag.
 
 ## Affected components
@@ -31,8 +31,8 @@ The subprocess manager: argument building, and the working directory and environ
 
 ## Revisit when
 
-- The proxy gets a non-local client, a browser-facing route, or a request field that can reach tool input.
+- The CLI is given built-in tools or MCP servers again, or the proxy gets a non-local client.
 - Alternatives, with recommendations:
-  - **Tool allowlist** (`--allowedTools`, `--disallowedTools`). Recommended first step. Allow only the tools the clients need, and deny Bash and WebFetch if they are not needed. Test with OpenClaw first.
-  - **Permission mode** (`--permission-mode`) plus an empty working directory. The CLI already runs in a fixed temp folder, but nothing empties or checks it, so this part is only partly done. Recommended only together with the allowlist. Its behaviour under `--print` is not checked here.
-  - **Separate low-privilege OS user.** Recommended if the flag stays. It limits what a successful attack can reach and needs no code change.
+  - **Tool allowlist** (`--allowedTools`, `--disallowedTools`). Recommended first step if tools come back. Allow only the tools the clients need, and deny Bash and WebFetch if they are not needed.
+  - **Permission mode** (`--permission-mode`) plus an empty working directory. The CLI runs in a fixed temp folder, but nothing empties or checks it, so this part is only partly done. Recommended only together with the allowlist. Its behaviour under `--print` is not checked here.
+  - **Separate low-privilege OS user.** Recommended if tools come back and the flag stays. It limits what a successful attack can reach and needs no code change.

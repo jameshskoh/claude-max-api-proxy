@@ -10,10 +10,12 @@ import { ClaudeSubprocess } from "../subprocess/manager.js";
 import { openaiToCli, openaiToCliDelta, extractModel, SUPPORTED_MODELS } from "../adapter/openai-to-cli.js";
 import {
   cliResultToOpenai,
+  createDeltaChunk,
   createDoneChunk,
 } from "../adapter/cli-to-openai.js";
+import { parseToolCalls, toolNamesOf, toolsActive } from "../adapter/tools.js";
 import { getSession, setSession, clearSession } from "../subprocess/session-store.js";
-import type { OpenAIChatRequest, OpenAIToolCall } from "../types/openai.js";
+import type { OpenAIChatChunkDelta, OpenAIChatRequest } from "../types/openai.js";
 import type { ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
 
 interface SessionContext {
@@ -94,11 +96,13 @@ export async function handleChatCompletions(
     const { cliInput, sessionKey, resume } = resolveCliInput(body);
     const subprocess = new ClaudeSubprocess();
     const sessionCtx: SessionContext = { sessionKey, resume, messageCount: body.messages.length };
+    // Reply text is only parsed for <tool_call> blocks when the request declares tools
+    const toolNames = toolsActive(body) ? toolNamesOf(body) : null;
 
     if (stream) {
-      await handleStreamingResponse(req, res, subprocess, cliInput, requestId, sessionCtx);
+      await handleStreamingResponse(req, res, subprocess, cliInput, requestId, sessionCtx, toolNames);
     } else {
-      await handleNonStreamingResponse(res, subprocess, cliInput, requestId, sessionCtx);
+      await handleNonStreamingResponse(res, subprocess, cliInput, requestId, sessionCtx, toolNames);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -117,19 +121,14 @@ export async function handleChatCompletions(
 }
 
 /**
- * Convert Claude tool_use ID to OpenAI-compatible call ID.
- * Claude uses "toolu_abc123", OpenAI uses "call_abc123".
- */
-function toOpenAICallId(claudeId: string): string {
-  return `call_${claudeId.replace("toolu_", "")}`;
-}
-
-/**
  * Handle streaming response (SSE)
  *
  * IMPORTANT: The Express req.on("close") event fires when the request body
  * is fully received, NOT when the client disconnects. For SSE connections,
  * we use res.on("close") to detect actual client disconnection.
+ *
+ * When toolNames is set (the request declares tools), text is held back until
+ * the result arrives so that <tool_call> blocks can be turned into tool_calls.
  */
 async function handleStreamingResponse(
   req: Request,
@@ -137,7 +136,8 @@ async function handleStreamingResponse(
   subprocess: ClaudeSubprocess,
   cliInput: ReturnType<typeof openaiToCli>,
   requestId: string,
-  sessionCtx: SessionContext
+  sessionCtx: SessionContext,
+  toolNames: Set<string> | null
 ): Promise<void> {
   // Set SSE headers
   res.setHeader("Content-Type", "text/event-stream");
@@ -157,8 +157,8 @@ async function handleStreamingResponse(
     const responseModel = cliInput.model;
     let isComplete = false;
     let hasEmittedText = false;
-    let toolCallIndex = 0;
-    let inToolBlock = false;
+    // Text of a tool-enabled reply, held back until the result arrives
+    let bufferedText = "";
 
     // Handle actual client disconnect (response stream closed)
     res.on("close", () => {
@@ -172,7 +172,9 @@ async function handleStreamingResponse(
     // When a new text content block starts after we've already emitted text,
     // insert a separator so text from different blocks doesn't run together
     subprocess.on("text_block_start", () => {
-      if (hasEmittedText && !res.writableEnded) {
+      if (toolNames) {
+        if (hasEmittedText) bufferedText += "\n\n";
+      } else if (hasEmittedText && !res.writableEnded) {
         const sepChunk = {
           id: `chatcmpl-${requestId}`,
           object: "chat.completion.chunk",
@@ -195,6 +197,11 @@ async function handleStreamingResponse(
       const delta = event.event.delta;
       const text = (delta?.type === "text_delta" && delta.text) || "";
       if (text && !res.writableEnded) {
+        if (toolNames) {
+          bufferedText += text;
+          hasEmittedText = true;
+          return;
+        }
         const chunk = {
           id: `chatcmpl-${requestId}`,
           object: "chat.completion.chunk",
@@ -215,85 +222,47 @@ async function handleStreamingResponse(
       }
     });
 
-    // DISABLED: Tool call forwarding causes an agentic loop — OpenClaw interprets
-    // Claude Code's internal tool_use (Read, Bash, etc.) as calls it needs to
-    // handle, triggering repeated requests. Claude Code handles tools internally
-    // via --print mode; only the final text result should be forwarded.
-    // TODO: Re-enable with a non-tool_calls display mechanism (e.g. inline text).
-    //
-    // subprocess.on("tool_use_start", (event: ClaudeCliStreamEvent) => {
-    //   if (res.writableEnded) return;
-    //   const block = event.event.content_block;
-    //   if (block?.type !== "tool_use") return;
-    //
-    //   inToolBlock = true;
-    //   const chunk = {
-    //     id: `chatcmpl-${requestId}`,
-    //     object: "chat.completion.chunk",
-    //     created: Math.floor(Date.now() / 1000),
-    //     model: lastModel,
-    //     choices: [{
-    //       index: 0,
-    //       delta: {
-    //         role: isFirst ? "assistant" : undefined,
-    //         tool_calls: [{
-    //           index: toolCallIndex,
-    //           id: toOpenAICallId(block.id),
-    //           type: "function" as const,
-    //           function: {
-    //             name: block.name,
-    //             arguments: "",
-    //           },
-    //         }],
-    //       },
-    //       finish_reason: null,
-    //     }],
-    //   };
-    //   res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-    //   isFirst = false;
-    // });
-    //
-    // subprocess.on("input_json_delta", (event: ClaudeCliStreamEvent) => {
-    //   if (res.writableEnded) return;
-    //   const delta = event.event.delta;
-    //   if (delta?.type !== "input_json_delta") return;
-    //
-    //   const chunk = {
-    //     id: `chatcmpl-${requestId}`,
-    //     object: "chat.completion.chunk",
-    //     created: Math.floor(Date.now() / 1000),
-    //     model: lastModel,
-    //     choices: [{
-    //       index: 0,
-    //       delta: {
-    //         tool_calls: [{
-    //           index: toolCallIndex,
-    //           function: {
-    //             arguments: delta.partial_json,
-    //           },
-    //         }],
-    //       },
-    //       finish_reason: null,
-    //     }],
-    //   };
-    //   res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-    // });
-    //
-    // subprocess.on("content_block_stop", () => {
-    //   if (inToolBlock) {
-    //     toolCallIndex++;
-    //     inToolBlock = false;
-    //   }
-    // });
-
     subprocess.on("result", (result: ClaudeCliResult) => {
       isComplete = true;
       if (sessionCtx.sessionKey && cliInput.sessionId) {
         setSession(sessionCtx.sessionKey, cliInput.sessionId, sessionCtx.messageCount);
       }
       if (!res.writableEnded) {
+        // Tool replies were buffered rather than streamed, so decide how to send them now
+        const replyText = bufferedText || result.result || "";
+        const toolReply = toolNames ? parseToolCalls(replyText, toolNames) : null;
+        if (toolReply) {
+          let roleSent = false;
+          if (toolReply.content !== null) {
+            const contentChunk = createDeltaChunk(requestId, responseModel, {
+              role: "assistant",
+              content: toolReply.content,
+            });
+            res.write(`data: ${JSON.stringify(contentChunk)}\n\n`);
+            roleSent = true;
+          }
+          const toolDelta: OpenAIChatChunkDelta = {
+            tool_calls: toolReply.toolCalls.map((call, index) => ({
+              index,
+              id: call.id,
+              type: call.type,
+              function: call.function,
+            })),
+          };
+          if (!roleSent) {
+            toolDelta.role = "assistant";
+          }
+          res.write(`data: ${JSON.stringify(createDeltaChunk(requestId, responseModel, toolDelta))}\n\n`);
+        } else if (toolNames && replyText) {
+          const textChunk = createDeltaChunk(requestId, responseModel, {
+            role: "assistant",
+            content: replyText,
+          });
+          res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
+        }
+
         // Send final done chunk with finish_reason and usage data
-        const doneChunk = createDoneChunk(requestId, responseModel);
+        const doneChunk = createDoneChunk(requestId, responseModel, toolReply ? "tool_calls" : "stop");
         if (result.usage) {
           doneChunk.usage = {
             prompt_tokens: result.usage.input_tokens || 0,
@@ -352,6 +321,7 @@ async function handleStreamingResponse(
       model: cliInput.model,
       sessionId: cliInput.sessionId,
       resume: sessionCtx.resume,
+      systemPrompt: cliInput.systemPrompt,
     }).catch((err) => {
       console.error("[Streaming] Subprocess start error:", err);
       reject(err);
@@ -367,28 +337,11 @@ async function handleNonStreamingResponse(
   subprocess: ClaudeSubprocess,
   cliInput: ReturnType<typeof openaiToCli>,
   requestId: string,
-  sessionCtx: SessionContext
+  sessionCtx: SessionContext,
+  toolNames: Set<string> | null
 ): Promise<void> {
   return new Promise((resolve) => {
     let finalResult: ClaudeCliResult | null = null;
-    // DISABLED: see tool call forwarding comment in handleStreamingResponse
-    // const accumulatedToolCalls: OpenAIToolCall[] = [];
-    //
-    // subprocess.on("assistant", (message: ClaudeCliAssistant) => {
-    //   for (const block of message.message.content) {
-    //     if (block.type === "tool_use") {
-    //       accumulatedToolCalls.push({
-    //         id: toOpenAICallId(block.id),
-    //         type: "function",
-    //         function: {
-    //           name: block.name,
-    //           arguments: JSON.stringify(block.input),
-    //         },
-    //       });
-    //     }
-    //   }
-    // });
-
     subprocess.on("result", (result: ClaudeCliResult) => {
       finalResult = result;
     });
@@ -413,7 +366,20 @@ async function handleNonStreamingResponse(
         if (sessionCtx.sessionKey && cliInput.sessionId) {
           setSession(sessionCtx.sessionKey, cliInput.sessionId, sessionCtx.messageCount);
         }
-        res.json(cliResultToOpenai(finalResult, requestId, cliInput.model));
+        const toolReply = toolNames
+          ? parseToolCalls(finalResult.result, toolNames)
+          : null;
+        res.json(
+          toolReply
+            ? cliResultToOpenai(
+                finalResult,
+                requestId,
+                cliInput.model,
+                toolReply.toolCalls,
+                toolReply.content
+              )
+            : cliResultToOpenai(finalResult, requestId, cliInput.model)
+        );
       } else {
         if (sessionCtx.resume && sessionCtx.sessionKey) {
           clearSession(sessionCtx.sessionKey);
@@ -437,6 +403,7 @@ async function handleNonStreamingResponse(
         model: cliInput.model,
         sessionId: cliInput.sessionId,
         resume: sessionCtx.resume,
+        systemPrompt: cliInput.systemPrompt,
       })
       .catch((error) => {
         res.status(500).json({

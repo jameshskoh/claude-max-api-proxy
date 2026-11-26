@@ -2,6 +2,7 @@
 
 - **Status:** Accepted, with known issues
 - **Introduced:** 0a70bdd, 2026-01-25, Atal Agarwal
+- **Revised:** 2026-11-25
 
 ## Context
 
@@ -20,7 +21,7 @@
 
 - **Good:** clients need no setup. Any OpenAI-compatible SDK works with a dummy key, and browser-based tools can call the API directly.
 - **Bad:**
-  - Any local process or OS user that can reach port 3456 can use the API, which gives it a command line as you ([skip-cli-permission-prompts](skip-cli-permission-prompts.md)).
+  - Any local process or OS user that can reach port 3456 can use the API, which gives free use of your Claude subscription through a text-only model (the CLI has no tools, see [skip-cli-permission-prompts](skip-cli-permission-prompts.md)).
   - Any website is likely able to send requests from your browser. CORS allows it, and DNS rebinding works because `Host` is never checked. Chrome's private-network-access rules block some of this, but this has not been tested in a browser. See item 1 of the [bad-coding-practices review](../security-review/bad-coding-practices.md).
   - Error responses return the raw error message to callers, which can include spawn errors and file paths.
 

@@ -2,7 +2,16 @@
  * Converts OpenAI chat request format to Claude CLI input
  */
 
-import type { OpenAIChatRequest, OpenAIContentBlock } from "../types/openai.js";
+import type {
+  OpenAIChatMessage,
+  OpenAIChatRequest,
+} from "../types/openai.js";
+import {
+  buildSystemPrompt,
+  extractText,
+  formatToolCallBlock,
+  formatToolResult,
+} from "./tools.js";
 
 /**
  * Full model IDs passed unchanged to `claude --model`.
@@ -26,6 +35,7 @@ export type SupportedModel = (typeof SUPPORTED_MODELS)[number];
 
 export interface CliInput {
   prompt: string;
+  systemPrompt: string;
   model: SupportedModel;
   sessionId?: string;
 }
@@ -57,51 +67,26 @@ function requireModel(model: unknown): SupportedModel {
 }
 
 /**
- * Extract text from a content field that may be a string or array of content blocks.
- * OpenAI API allows content as either:
- *   - A plain string: "Hello"
- *   - An array of content blocks: [{"type": "text", "text": "Hello"}]
+ * Find the function name for a tool call id by searching the tool_calls of
+ * every assistant message. Returns undefined if no assistant message has it.
  */
-function extractText(content: string | OpenAIContentBlock[]): string {
-  if (typeof content === "string") {
-    return content;
+function findToolName(
+  toolCallId: string | undefined,
+  allMessages: OpenAIChatMessage[]
+): string | undefined {
+  if (toolCallId === undefined) {
+    return undefined;
   }
-  if (Array.isArray(content)) {
-    return content
-      .filter((block) => block.type === "text" || block.type === "input_text")
-      .map((block) => block.text)
-      .join("\n");
+  for (const msg of allMessages) {
+    if (msg.role !== "assistant") {
+      continue;
+    }
+    const call = msg.tool_calls?.find((c) => c.id === toolCallId);
+    if (call) {
+      return call.function.name;
+    }
   }
-  return String(content || "");
-}
-
-/**
- * Strip OpenClaw-specific tooling sections from system prompts.
- * These reference tools (exec, process, web_search, etc.) that don't exist
- * in the Claude Code CLI environment, causing the model to get confused.
- * We remove: ## Tooling, ## Tool Call Style, ## OpenClaw CLI Quick Reference,
- * ## OpenClaw Self-Update
- */
-function stripOpenClawTooling(text: string): string {
-  const sectionsToStrip = [
-    "## Tooling",
-    "## Tool Call Style",
-    "## OpenClaw CLI Quick Reference",
-    "## OpenClaw Self-Update",
-  ];
-  let result = text;
-  for (const section of sectionsToStrip) {
-    // Match from section header to the next ## header (or end of string)
-    const pattern = new RegExp(
-      section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") +
-        "\\n[\\s\\S]*?(?=\\n## |$)",
-      "g"
-    );
-    result = result.replace(pattern, "");
-  }
-  // Clean up excessive blank lines left behind
-  result = result.replace(/\n{3,}/g, "\n\n");
-  return result.trim();
+  return undefined;
 }
 
 /**
@@ -109,9 +94,21 @@ function stripOpenClawTooling(text: string): string {
  *
  * Claude Code CLI in --print mode expects a single prompt, not a conversation.
  * We format the messages into a readable format that preserves context.
+ *
+ * Mapping per role:
+ *   - system / developer: omitted here; they go into the system prompt.
+ *   - user: raw text.
+ *   - assistant: wrapped in a previous_response block. Any tool_calls it made
+ *     follow its text as <tool_call> blocks. Empty text adds no blank line.
+ *   - tool: a <tool_result> block carrying the tool_call_id, and the function
+ *     name looked up from the matching tool call in allMessages.
+ *
+ * allMessages defaults to messages. Pass the full request history when
+ * messages is a slice, so tool names can still be resolved.
  */
 export function messagesToPrompt(
-  messages: OpenAIChatRequest["messages"]
+  messages: OpenAIChatMessage[],
+  allMessages: OpenAIChatMessage[] = messages
 ): string {
   const parts: string[] = [];
 
@@ -119,9 +116,8 @@ export function messagesToPrompt(
     const text = extractText(msg.content);
     switch (msg.role) {
       case "system":
-        // System messages become context instructions
-        // Strip OpenClaw tooling sections that conflict with Claude Code's native tools
-        parts.push(`<system>\n${stripOpenClawTooling(text)}\n</system>\n`);
+      case "developer":
+        // Rendered into the system prompt instead (see buildSystemPrompt)
         break;
 
       case "user":
@@ -129,10 +125,25 @@ export function messagesToPrompt(
         parts.push(text);
         break;
 
-      case "assistant":
-        // Previous assistant responses for context
-        parts.push(`<previous_response>\n${text}\n</previous_response>\n`);
+      case "assistant": {
+        // Previous assistant responses for context, including any tool calls
+        const inner: string[] = [];
+        if (text.trim().length > 0) {
+          inner.push(text);
+        }
+        for (const call of msg.tool_calls ?? []) {
+          inner.push(formatToolCallBlock(call.function.name, call.function.arguments));
+        }
+        parts.push(`<previous_response>\n${inner.join("\n")}\n</previous_response>\n`);
         break;
+      }
+
+      case "tool": {
+        // Client tool output, named after the call it answers
+        const name = findToolName(msg.tool_call_id, allMessages);
+        parts.push(formatToolResult(text, msg.tool_call_id, name));
+        break;
+      }
     }
   }
 
@@ -145,6 +156,7 @@ export function messagesToPrompt(
 export function openaiToCli(request: OpenAIChatRequest): CliInput {
   return {
     prompt: messagesToPrompt(request.messages),
+    systemPrompt: buildSystemPrompt(request),
     model: requireModel(request.model),
     sessionId: request.user, // Use OpenAI's user field for session mapping
   };
@@ -164,10 +176,13 @@ export function openaiToCliDelta(
     .slice(sinceIndex)
     .filter((m) => m.role !== "assistant");
 
+  // Fallback to full history if nothing new was rendered (shouldn't happen,
+  // but never send an empty prompt to the CLI). Checks the rendered string,
+  // since system-only messages render to nothing.
+  const delta = messagesToPrompt(newMessages, request.messages);
   return {
-    // Fallback to full history if nothing new was found (shouldn't happen,
-    // but never send an empty prompt to the CLI)
-    prompt: messagesToPrompt(newMessages.length ? newMessages : request.messages),
+    prompt: delta.length > 0 ? delta : messagesToPrompt(request.messages),
+    systemPrompt: buildSystemPrompt(request),
     model: requireModel(request.model),
     sessionId: request.user,
   };

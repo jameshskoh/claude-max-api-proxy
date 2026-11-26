@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, afterEach, before, describe, it } from "node:test";
-import { ClaudeSubprocess, defaultCliCwd } from "./manager.js";
+import { ClaudeSubprocess, defaultCliCwd, type SubprocessOptions } from "./manager.js";
 
 const WINDOWS_ONLY = process.platform !== "win32";
 const WAIT_TIMEOUT_MS = 5_000;
@@ -16,6 +16,75 @@ it("defaultCliCwd returns a fixed temp folder that exists as a directory", async
   assert.equal(dir, path.join(tmpdir(), "claude-max-proxy"));
   const info = await stat(dir);
   assert.equal(info.isDirectory(), true);
+});
+
+describe("CLI argv for plain-LLM mode", { skip: !WINDOWS_ONLY }, () => {
+  // Runs the real argv builder with a recorder script in place of the CLI, so
+  // the flags are checked as they would reach the CLI.
+  let fixtureDir: string;
+  let argvPath: string;
+  let fixturePath: string;
+  let previousClaudeBin: string | undefined;
+  let previousArgvOut: string | undefined;
+
+  before(async () => {
+    previousClaudeBin = process.env.CLAUDE_BIN;
+    previousArgvOut = process.env.FIXTURE_ARGV_OUT;
+    fixtureDir = await mkdtemp(path.join(tmpdir(), "claude-argv-"));
+    argvPath = path.join(fixtureDir, "argv.json");
+    fixturePath = path.join(fixtureDir, "record-argv.cjs");
+    await writeFile(
+      fixturePath,
+      [
+        'const { writeFileSync } = require("node:fs");',
+        'process.stdin.resume();',
+        'process.stdin.on("end", () => {',
+        "  writeFileSync(process.env.FIXTURE_ARGV_OUT, JSON.stringify(process.argv.slice(2)));",
+        "});",
+      ].join("\n"),
+      "utf8"
+    );
+
+    process.env.CLAUDE_BIN = process.execPath;
+    process.env.FIXTURE_ARGV_OUT = argvPath;
+  });
+
+  after(async () => {
+    restoreEnvironmentVariable("CLAUDE_BIN", previousClaudeBin);
+    restoreEnvironmentVariable("FIXTURE_ARGV_OUT", previousArgvOut);
+    await rm(fixtureDir, { recursive: true, force: true });
+  });
+
+  it("disables built-in tools and MCP, and sends only the proxy system prompt", async () => {
+    const systemPrompt = "You are a test. Reply with <tool_call> blocks when asked.";
+    const subprocess = new ClaudeSubprocess();
+    subprocess.on("error", () => {});
+    const testable = subprocess as unknown as {
+      buildArgs: (options: SubprocessOptions) => string[];
+    };
+    const buildRealArgs = testable.buildArgs.bind(subprocess);
+    // Node runs the recorder script first; the real CLI flags follow it.
+    testable.buildArgs = (options) => [fixturePath, ...buildRealArgs(options)];
+
+    const closed = new Promise<number | null>((resolve) =>
+      subprocess.once("close", resolve)
+    );
+    await subprocess.start("hello", {
+      model: "claude-haiku-4-5",
+      systemPrompt,
+      timeout: GENEROUS_REQUEST_TIMEOUT_MS,
+    });
+    await withTimeout(closed, "argv recorder did not exit");
+
+    const argv = JSON.parse(await readFile(argvPath, "utf8")) as string[];
+    assert.ok(argv.includes("--tools"), "expected --tools");
+    assert.equal(argv[argv.indexOf("--tools") + 1], "", "--tools must be followed by an empty value");
+    assert.ok(argv.includes("--strict-mcp-config"), "expected --strict-mcp-config");
+    assert.ok(argv.includes("--safe-mode"), "expected --safe-mode");
+    assert.ok(argv.includes("--system-prompt"), "expected --system-prompt");
+    assert.equal(argv[argv.indexOf("--system-prompt") + 1], systemPrompt);
+    assert.ok(!argv.includes("--append-system-prompt"), "OpenClaw append flag must be gone");
+  });
 });
 
 describe("Windows process-tree termination", { skip: WINDOWS_ONLY }, () => {

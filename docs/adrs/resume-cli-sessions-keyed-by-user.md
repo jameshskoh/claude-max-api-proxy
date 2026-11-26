@@ -2,6 +2,7 @@
 
 - **Status:** Accepted, with known issues
 - **Introduced:** d39204e, 2026-08-08, AndySian
+- **Revised:** 2026-11-25
 
 ## Context
 
@@ -13,7 +14,7 @@
 
 - Use the OpenAI `user` field as the session key.
 - First turn: pass a new UUID as `--session-id`. On any `result` event, save the CLI session ID, the current message count and a last-used time. This happens even when `is_error` is true.
-- Later turns: pass `--resume <id>` and send only messages after the saved message count. Assistant messages are dropped, because the CLI already generated them.
+- Later turns: pass `--resume <id>` and the system prompt again, and send only messages after the saved message count. Assistant messages are dropped, because the CLI already generated them. Tool messages after the saved count are sent.
 - No `user`: pass `--no-session-persistence`. There is no shared fallback key.
 - Resume failure (error or abnormal exit) clears the entry, so the next turn sends full history to a new session.
 - Store: in process memory. Entries expire 6 hours after last use; an `unref`'d timer sweeps every 30 minutes.
@@ -27,7 +28,7 @@
   - The map is lost on restart. Transcripts stay under `~/.claude/projects/`, but the proxy cannot find them.
   - Two concurrent requests with the same `user` race on one session.
   - An edited or shortened history gives an empty delta. The code then sends the full history into the resumed session.
-  - Changes to messages before the saved count, such as a new system prompt, are never sent.
+  - Changes to messages before the saved count are never sent. The system prompt is the exception: it is sent on every turn, so a changed one takes effect.
   - Two clients sending the same `user` value share a session.
   - The legacy session manager is a file store that the server does not use. It is easy to confuse with the session store.
 
