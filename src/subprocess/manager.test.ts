@@ -18,6 +18,48 @@ it("defaultCliCwd returns a fixed temp folder that exists as a directory", async
   assert.equal(info.isDirectory(), true);
 });
 
+describe("spawn failures", () => {
+  let previousClaudeBin: string | undefined;
+
+  before(() => {
+    previousClaudeBin = process.env.CLAUDE_BIN;
+  });
+
+  after(() => {
+    restoreEnvironmentVariable("CLAUDE_BIN", previousClaudeBin);
+  });
+
+  it("reports a missing CLI binary as an error event, followed by close", async () => {
+    // A path under the temp dir that is never created, so spawn fails with ENOENT
+    process.env.CLAUDE_BIN = path.join(
+      tmpdir(),
+      `claude-missing-${process.pid}-${Date.now()}`
+    );
+    const subprocess = new ClaudeSubprocess();
+    const events: string[] = [];
+    let error: Error | undefined;
+    subprocess.on("error", (err: Error) => {
+      events.push("error");
+      error = err;
+    });
+    const closed = new Promise<void>((resolve) =>
+      subprocess.once("close", () => {
+        events.push("close");
+        resolve();
+      })
+    );
+
+    await subprocess.start("hi", {
+      model: "claude-haiku-4-5",
+      timeout: WAIT_TIMEOUT_MS,
+    });
+    await withTimeout(closed, "missing binary did not emit close");
+
+    assert.deepEqual(events, ["error", "close"]);
+    assert.match(error?.message ?? "", /Claude CLI not found/);
+  });
+});
+
 describe("CLI argv for plain-LLM mode", { skip: !WINDOWS_ONLY }, () => {
   // Runs the real argv builder with a recorder script in place of the CLI, so
   // the flags are checked as they would reach the CLI.

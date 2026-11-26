@@ -2,7 +2,7 @@
 
 - **Status:** Accepted, with known issues
 - **Introduced:** 0a70bdd, 2026-01-25, Atal Agarwal
-- **Revised:** 2026-11-25
+- **Revised:** 2026-11-27
 
 ## Context
 
@@ -27,7 +27,7 @@ Each request spawns its own `claude` process. There is no pool, no queue and no 
 - **Bad:**
   - Each request pays a cold start (CLI boot and system prompt).
   - Concurrent processes are unbounded.
-  - A streaming client that disconnects kills the CLI. A non-streaming client that disconnects does not, because that path has no close listener, so the CLI keeps running.
+  - A client that disconnects kills the CLI, on streaming and non-streaming requests alike, so that run's output is lost.
   - Every run skips permission prompts.
   - The CLI still adds an account-context block (the logged-in account's email) that the plain-LLM flags do not remove.
 
@@ -40,4 +40,3 @@ The chat completions handler, which creates one subprocess per request, and the 
 - Load grows enough to need a bounded pool or queue, the `maxConcurrent` idea from old `DESIGN.md`.
 - Cold-start latency becomes a problem for clients.
 - The CLI offers a long-running or stream-json input mode that avoids a spawn per request.
-- Non-streaming disconnects need to kill the CLI.

@@ -49,7 +49,7 @@ Runtime flows are in [WORKFLOW.md](WORKFLOW.md), and the reasons for design choi
 - Text deltas become `chat.completion.chunk` events as they arrive, unless the request has active tools. Then all text is held until the CLI run ends (see the streaming response section).
 - A `\n\n` chunk separates text blocks when a new one starts after text was already sent.
 - Usage is on the final chunk.
-- A client disconnect kills the CLI.
+- A client disconnect kills the CLI, for non-streaming requests as well.
 
 **Model selection**
 
@@ -156,7 +156,7 @@ This table is the one place that maps components to files. The rest of the docs 
 | Session store | `src/subprocess/session-store.ts` | In-memory `user` to CLI session map with TTL. |
 | Legacy session manager | `src/session/manager.ts` | Old file-backed session map. Not used by the server. |
 | Types | `src/types/` | OpenAI request and response shapes (including tools and tool calls), CLI stream-json message shapes and type guards. |
-| Tests | `src/**/*.test.ts` | An end-to-end test against the real CLI, Windows-only process-tree tests, and unit tests for the model check. See [WORKFLOW.md](WORKFLOW.md#tests). |
+| Tests | `src/**/*.test.ts` | An end-to-end test against the real CLI, Windows-only process-tree tests, a missing-binary spawn test, and unit tests for the model check. See [WORKFLOW.md](WORKFLOW.md#tests). |
 
 **Entry points**
 
@@ -245,9 +245,9 @@ With active tools, no text reaches the client until the CLI run ends. After that
 - Validation: `400 {"error":{"message","type":"invalid_request_error","code":"invalid_messages"}}`.
 - Missing, non-string or unsupported `model`: `404 {"error":{"message","type":"invalid_request_error","param":"model","code":"model_not_found"}}`. The message lists the supported IDs. Checked after the messages check, so an empty `messages` gets the 400.
 - Anything thrown before streaming starts: `500`, `type: "server_error"`, `code: null`.
-- Non-streaming CLI error, timeout or early exit: `500 server_error`.
+- Non-streaming CLI error, timeout, early exit or failed spawn: `500 server_error`.
 - Malformed JSON, or a body over 10 MB: `500 server_error` with the parser message. These are not 400 or 413.
-- Streaming, error during the run: a `data: {"error":{…}}` line, then the stream ends with no `[DONE]`.
+- Streaming, error during the run or a failed spawn: a `data: {"error":{…}}` line, then the stream ends with no `[DONE]`.
 - Streaming, CLI exits with no result: an error line, then `[DONE]`.
 
 ### Config surface
@@ -340,7 +340,7 @@ Shape examples, trimmed from old `PROTOCOL.md` (captured output, not a spec):
 | Non-streaming response shape or usage | Response adapter | Non-streaming path (request handlers); CLI result usage types | None (see sharp edges) |
 | Multi-turn or session bugs | Session resolution (request handlers) | Session store; delta prompt (request adapter); every place that saves or clears a session on result, error or close | [resume-cli-sessions-keyed-by-user](adrs/resume-cli-sessions-keyed-by-user.md) |
 | Auth, CORS or security hardening | CORS and OPTIONS (HTTP app); the auth check (subprocess manager) | Host binding (HTTP app); the permissions flag; [security review](security-review/bad-coding-practices.md) | [localhost-only-no-auth-open-cors](adrs/localhost-only-no-auth-open-cors.md) |
-| Timeouts, kill or orphaned processes | Timeout and kill (subprocess manager) | Process-tree kill; the disconnect handler in the streaming path | [resolve-windows-exe-and-kill-process-tree](adrs/resolve-windows-exe-and-kill-process-tree.md) |
+| Timeouts, kill or orphaned processes | Timeout and kill (subprocess manager) | Process-tree kill; the disconnect handlers in both response paths | [resolve-windows-exe-and-kill-process-tree](adrs/resolve-windows-exe-and-kill-process-tree.md) |
 | Windows issues | CLI binary lookup (subprocess manager) | Process-tree kill; spawn options | [resolve-windows-exe-and-kill-process-tree](adrs/resolve-windows-exe-and-kill-process-tree.md) |
 | Request validation or body parse errors | Validation in the chat completions handler | Body parser and error handler (HTTP app) | None |
 | Startup checks | Standalone entry | CLI and auth checks (subprocess manager) | None |
@@ -364,7 +364,7 @@ Items marked **inferred** come from reading the code. They have not been run.
 - **A shrunken history floods the resumed session.** If `messages` gets shorter than the stored `messageCount`, the delta is empty, and the full history is sent into the resumed session. Edits that keep the length the same are not sent, because only the tail is. **Inferred.**
 - **Two concurrent requests with the same `user` share one session.** Nothing serializes turns, and both `--resume` the same ID. Behaviour under concurrent `--resume` is untested.
 - **The session map is lost on restart.** It lives in process memory. The next turn starts a new CLI session with the full history. The CLI's own transcripts stay on disk.
-- **A non-streaming client that disconnects does not stop the CLI.** Only the streaming path listens for the response closing. The CLI runs until it finishes or hits the 15-minute timeout. Its summary line is written at the disconnect, as `aborted`, with no token counts. **Inferred.**
+- **Aborted requests log no usage.** A request whose client disconnects is logged as `aborted` at the disconnect, with no token counts, so the usage of a run that was killed is not recorded.
 - **On macOS and Linux, kill signals only the direct child.** Descendants are not reached. Timeouts and client disconnects both use this path. Windows uses `taskkill /T`.
 - **Listener exceptions are swallowed.** Stdout parsing wraps event emission in the same `try` as the JSON parse. A throw in a request-handler listener becomes a `raw` event that nothing listens to, so the failure is silent. **Inferred.**
 - **The auth check always passes.** A logged-out CLI shows up on the first request, not at startup.

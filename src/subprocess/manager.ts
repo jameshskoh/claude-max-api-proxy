@@ -197,17 +197,19 @@ export class ClaudeSubprocess extends EventEmitter {
 
         this.armTimeout(timeout);
 
-        // Handle spawn errors (e.g., claude not found)
+        // Handle spawn errors (e.g., claude not found). spawn() reports these
+        // after start() has already resolved, so they go out as this
+        // subprocess's "error" event, not as a rejection. "close" still follows.
         this.process.on("error", (err) => {
           this.clearTimeout();
-          if (err.message.includes("ENOENT")) {
-            reject(
-              new Error(
+          const reported = err.message.includes("ENOENT")
+            ? new Error(
                 "Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code"
               )
-            );
-          } else {
-            reject(err);
+            : err;
+          // Without a listener, emitting "error" would throw and crash the process
+          if (this.listenerCount("error") > 0) {
+            this.emit("error", reported);
           }
         });
 
