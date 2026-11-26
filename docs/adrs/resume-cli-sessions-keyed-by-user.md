@@ -2,7 +2,7 @@
 
 - **Status:** Accepted, with known issues
 - **Introduced:** d39204e, 2026-08-08, AndySian
-- **Revised:** 2026-11-25
+- **Revised:** 2026-11-27
 
 ## Context
 
@@ -16,7 +16,7 @@
 - First turn: pass a new UUID as `--session-id`. On any `result` event, save the CLI session ID, the current message count and a last-used time. This happens even when `is_error` is true.
 - Later turns: pass `--resume <id>` and the system prompt again, and send only messages after the saved message count. Assistant messages are dropped, because the CLI already generated them. Tool messages after the saved count are sent.
 - No `user`: pass `--no-session-persistence`. There is no shared fallback key.
-- Resume failure (error or abnormal exit) clears the entry, so the next turn sends full history to a new session.
+- Resume failure (a timeout, a failed spawn or an abnormal exit) clears the entry, so the next turn sends full history to a new session. An `is_error` result keeps the entry, as above.
 - Store: in process memory. Entries expire 6 hours after last use; an `unref`'d timer sweeps every 30 minutes.
 
 ## Consequences

@@ -8,7 +8,7 @@ Runtime flows are in [WORKFLOW.md](WORKFLOW.md), and the reasons for design choi
 
 **Problem.** A Claude subscription (Pro, Max or Team) does not work through the normal API, because its OAuth token is scope-restricted (old `DESIGN.md`). The proxy gets around this by running the official `claude` CLI, which holds the subscription login, and presenting its output as an OpenAI-compatible HTTP API.
 
-**Users.** One person on one machine. Any OpenAI-compatible client that can reach `127.0.0.1:3456` works, including clients that send their own tools. OpenClaw was the original main client. There is no multi-user mode.
+**Users.** One person on one machine. Any OpenAI-compatible client that can reach `127.0.0.1:3456` works, including clients that send their own tools, as long as it addresses the server by a local name (see the Host check). OpenClaw was the original main client. There is no multi-user mode.
 
 **Category.** A local OpenAI-compatible server in front of the Claude CLI, run as a plain language model. The CLI has no built-in tools, no MCP servers and no user or project configuration. A request is a chat: the client gets back the model's text. Tools are the client's: the proxy describes the client's tools to the model, and when the model asks for one, the proxy returns that as an OpenAI tool call. The proxy runs no tools itself.
 
@@ -25,7 +25,7 @@ Runtime flows are in [WORKFLOW.md](WORKFLOW.md), and the reasons for design choi
 
 **API surface**
 
-- `GET /health`, `GET /v1/models`, `POST /v1/chat/completions`, and `OPTIONS *`. Any other path returns a JSON 404.
+- `GET /health`, `GET /v1/models`, `POST /v1/chat/completions`. Any other path or method, OPTIONS included, returns a JSON 404.
 - `stream: true` returns Server-Sent Events. Otherwise the response is one JSON body.
 - Errors use the OpenAI error shape.
 
@@ -146,7 +146,7 @@ This table is the one place that maps components to files. The rest of the docs 
 |---|---|---|
 | Standalone entry | `src/server/standalone.ts` | What runs. Parses the port, runs the startup checks, starts the server, handles SIGINT and SIGTERM. |
 | Plugin entry | `src/index.ts` | Clawdbot provider plugin, the models it advertises, and the library exports. |
-| HTTP app | `src/server/index.ts` | Express app: body parsing, debug log, CORS, routing, 404, error handler, listen and stop. |
+| HTTP app | `src/server/index.ts` | Express app: Host check, body parsing, debug log, routing, 404, error handler, listen and stop. |
 | Request handlers | `src/server/routes.ts` | Chat completions (validation, model check, session resolution, streaming and non-streaming paths, and tool-call handling when tools are active), models, health. Also decides when each chat-completion request has finished, for the summary line. |
 | Request log | `src/server/request-log.ts` | Formats the one-line summary written for each chat-completion request, from fields the request handlers collect. Formatting only. |
 | Request adapter | `src/adapter/openai-to-cli.ts` | The supported-model list and its check, prompt flattening for user, assistant and tool messages, and the delta prompt. |
@@ -187,10 +187,9 @@ Adding a model means adding it to the supported-model list and checking the ID a
 | `GET /health` | `200 {"status":"ok","provider":"claude-code-cli","timestamp":"…"}` |
 | `GET /v1/models` | `200 {"object":"list","data":[{"id","object":"model","owned_by":"anthropic","created"}]}` |
 | `POST /v1/chat/completions` | Chat handler, below. |
-| `OPTIONS *` | `200`, empty body. |
 | anything else | `404 {"error":{"message":"Not found","type":"invalid_request_error","code":"not_found"}}` |
 
-Every response carries `Access-Control-Allow-Origin: *`. See the [security review](security-review/bad-coding-practices.md) for what that means.
+Responses carry no CORS headers. A request whose Host is not a local name (localhost, `127.0.0.1`, `::1`, or the bind host) gets `403 {"error":{"message":"Forbidden host","type":"invalid_request_error","code":"forbidden_host"}}`. This blocks drive-by browser use and DNS rebinding. See [localhost-only-no-auth-host-allowlist](adrs/localhost-only-no-auth-host-allowlist.md).
 
 **Request fields actually used**
 
@@ -245,9 +244,10 @@ With active tools, no text reaches the client until the CLI run ends. After that
 - Validation: `400 {"error":{"message","type":"invalid_request_error","code":"invalid_messages"}}`.
 - Missing, non-string or unsupported `model`: `404 {"error":{"message","type":"invalid_request_error","param":"model","code":"model_not_found"}}`. The message lists the supported IDs. Checked after the messages check, so an empty `messages` gets the 400.
 - Anything thrown before streaming starts: `500`, `type: "server_error"`, `code: null`.
-- Non-streaming CLI error, timeout, early exit or failed spawn: `500 server_error`.
+- Non-streaming CLI error, timeout, early exit or failed spawn: `500 server_error`. A CLI result with `is_error` true is the same, with the CLI's message.
 - Malformed JSON, or a body over 10 MB: `500 server_error` with the parser message. These are not 400 or 413.
 - Streaming, error during the run or a failed spawn: a `data: {"error":{…}}` line, then the stream ends with no `[DONE]`.
+- Streaming, CLI result with `is_error` true: the same error line with the CLI's message, then `[DONE]`, then the stream ends.
 - Streaming, CLI exits with no result: an error line, then `[DONE]`.
 
 ### Config surface
@@ -255,7 +255,7 @@ With active tools, no text reaches the client until the CLI run ends. After that
 | Setting | Default | Notes |
 |---|---|---|
 | Port (first CLI argument) | 3456 | The only CLI argument. The plugin asks for it during setup. Not an env var. |
-| Host | `127.0.0.1` | Library callers of the server start function can pass a host. Nothing in the repo does, and there is no CLI or env option. |
+| Host | `127.0.0.1` | Library callers of the server start function can pass a host. Nothing in the repo does, and there is no CLI or env option. Its value is also accepted in the Host check. |
 | `DEBUG` | off | Logs request lines and body prefixes (200 and 300 characters). |
 | `DEBUG_SUBPROCESS` | off | Logs CLI arguments (which include the system prompt), a 200-character prompt prefix, stdout sizes and stderr. |
 | Request summary line | always on | One line per chat-completion request when it finishes. No setting turns it off. Format in [WORKFLOW.md](WORKFLOW.md#dev-loop). |
@@ -307,7 +307,7 @@ The session flag has three branches:
 | `system` / `init` | No. Only the generic `message` event carries it, and nothing listens. |
 | `system` / `hook_started`, `hook_response` | No. |
 | `assistant` | No. Emitted, but nothing listens. Its `tool_use` blocks are not read, and the CLI produces none while it has no tools. |
-| `result` | Yes. Streaming: usage, tool-call handling, done chunk, session save. Non-streaming: the whole body, with tool-call handling. `subtype` and `is_error` are never read. |
+| `result` | Yes. Streaming: usage, tool-call handling, done chunk, session save. Non-streaming: the whole body, with tool-call handling. `is_error` true makes the result an error (see the error shapes above). `subtype` is used only in the fallback error message. |
 | `stream_event` / `content_block_delta` with `text_delta` | Yes. Becomes an SSE chunk, or held text when tools are active. |
 | `stream_event` / `content_block_start` with `text` | Yes. Triggers the block separator. |
 | `stream_event` / `content_block_start` with `tool_use` | Emitted as `tool_use_start`. Nothing listens. Does not occur while the CLI has no tools. |
@@ -339,9 +339,11 @@ Shape examples, trimmed from old `PROTOCOL.md` (captured output, not a spec):
 | Streaming output bugs | Streaming path (request handlers) | Stdout line parsing (subprocess manager); `stream_event` type guards; the block separator; the held text when tools are active | [stream-text-deltas-as-sse](adrs/stream-text-deltas-as-sse.md) |
 | Non-streaming response shape or usage | Response adapter | Non-streaming path (request handlers); CLI result usage types | None (see sharp edges) |
 | Multi-turn or session bugs | Session resolution (request handlers) | Session store; delta prompt (request adapter); every place that saves or clears a session on result, error or close | [resume-cli-sessions-keyed-by-user](adrs/resume-cli-sessions-keyed-by-user.md) |
-| Auth, CORS or security hardening | CORS and OPTIONS (HTTP app); the auth check (subprocess manager) | Host binding (HTTP app); the permissions flag; [security review](security-review/bad-coding-practices.md) | [localhost-only-no-auth-open-cors](adrs/localhost-only-no-auth-open-cors.md) |
+| Auth, CORS or security hardening | Host check and error handler (HTTP app); the auth check (subprocess manager) | Bind host; the permissions flag; [security review](security-review/bad-coding-practices.md) | [localhost-only-no-auth-host-allowlist](adrs/localhost-only-no-auth-host-allowlist.md) |
 | Timeouts, kill or orphaned processes | Timeout and kill (subprocess manager) | Process-tree kill; the disconnect handlers in both response paths | [resolve-windows-exe-and-kill-process-tree](adrs/resolve-windows-exe-and-kill-process-tree.md) |
 | Windows issues | CLI binary lookup (subprocess manager) | Process-tree kill; spawn options | [resolve-windows-exe-and-kill-process-tree](adrs/resolve-windows-exe-and-kill-process-tree.md) |
+| Host check (403), CORS, or local-only access | HTTP app (Host check and bind host) | The Host setting (config surface) | [localhost-only-no-auth-host-allowlist](adrs/localhost-only-no-auth-host-allowlist.md) |
+| CLI `is_error` results | Response adapter (error message) and request handlers (both response paths) | Session save, which still happens on such a result | None |
 | Request validation or body parse errors | Validation in the chat completions handler | Body parser and error handler (HTTP app) | None |
 | Startup checks | Standalone entry | CLI and auth checks (subprocess manager) | None |
 | Clawdbot plugin | Plugin entry | Legacy session manager | [local-openai-proxy-over-clawdbot-backend](adrs/local-openai-proxy-over-clawdbot-backend.md) |
@@ -353,7 +355,6 @@ Shape examples, trimmed from old `PROTOCOL.md` (captured output, not a spec):
 Items marked **inferred** come from reading the code. They have not been run.
 
 - **A JSON `null` body crashes the process.** `JSON.parse("null")` makes the body `null`. The handler reads `body.stream` before its `try` block. The async handler rejects, and Express 4 does not catch that. Node exits on an unhandled rejection by default. Also in the [security review](security-review/bad-coding-practices.md).
-- **CLI error results look like successes.** `is_error` and `subtype` are never read, and the finish reason is `"stop"` unless tool calls were parsed. A failed run can come back as HTTP 200 with the error text as content. The session is still saved for that turn, so the next turn resumes after the failed one. **Inferred.**
 - **Streaming and non-streaming can return different text.** Streaming forwards every text delta, with separators between blocks. Non-streaming returns only the result message's final text. They can differ when the CLI emits several text blocks. **Inferred.**
 - **Text-parsed tool calls fall back to plain text.** If any tool-call block is malformed (see Fallback to text), the whole reply goes back as text with finish reason `stop`. Only a server log line records the failure, so the client sees the raw markup and may not realise a call was intended. This is deliberate: keeping only the valid calls could lose work silently.
 - **Tool choice is advisory.** `required` and the named-function choice only add a sentence to the system prompt. A reply with no block is a normal text reply, and nothing retries it.

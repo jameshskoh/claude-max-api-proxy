@@ -22,7 +22,7 @@ Start with [ARCHITECTURE.md](../ARCHITECTURE.md) for the map and [WORKFLOW.md](.
 | [stream-text-deltas-as-sse](stream-text-deltas-as-sse.md) | Turn CLI `stream_event` text deltas into OpenAI SSE chunks. | fix streaming output, disconnects or usage in the final chunk |
 | [run-cli-as-plain-llm-with-prompt-tool-calls](run-cli-as-plain-llm-with-prompt-tool-calls.md) | The CLI has no tools; client `tools` go in the system prompt and `<tool_call>` replies become `tool_calls`. | change tool calling, CLI tool/config flags, or the system prompt |
 | [skip-cli-permission-prompts](skip-cli-permission-prompts.md) | Always pass `--dangerously-skip-permissions`. | restrict tools, harden the agent |
-| [localhost-only-no-auth-open-cors](localhost-only-no-auth-open-cors.md) | Bind 127.0.0.1, no auth, CORS `*`. | add auth, fix CORS, expose the server |
+| [localhost-only-no-auth-host-allowlist](localhost-only-no-auth-host-allowlist.md) | Bind 127.0.0.1, no auth, no CORS, Host must be a local name. | add auth, change the Host check or CORS, expose the server |
 | [resolve-windows-exe-and-kill-process-tree](resolve-windows-exe-and-kill-process-tree.md) | Spawn the bundled `.exe` without a shell; kill the whole tree. | fix Windows issues or orphaned processes |
 
 ## Template

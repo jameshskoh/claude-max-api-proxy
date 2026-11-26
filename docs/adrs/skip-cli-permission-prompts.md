@@ -22,7 +22,7 @@
 - **Bad:**
   - The flag lets any tool that does run proceed without asking, with your user account's rights. With no tools enabled, the model can only return text, so the risk is limited to what a text-only model can do. If built-in tools or MCP servers are turned on again, the flag applies to them too.
   - The CLI starts in a fixed folder under the OS temp directory, not the proxy's own. That folder is not a sandbox: it only sets where session files go. If tools come back, absolute paths reach the rest of the account.
-  - With no auth and CORS `*` ([localhost-only-no-auth-open-cors](localhost-only-no-auth-open-cors.md)), a web page can use the proxy, but the model can only return text.
+  - With no auth, no CORS headers and a Host allowlist ([localhost-only-no-auth-host-allowlist](localhost-only-no-auth-host-allowlist.md)), a web page in the browser cannot read its replies, and the model can only return text.
   - The README security section does not mention this flag.
 
 ## Affected components
