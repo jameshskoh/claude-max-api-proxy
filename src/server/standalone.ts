@@ -57,14 +57,34 @@ async function main(): Promise<void> {
   }
 
   // Handle graceful shutdown
+  let shuttingDown = false;
   const shutdown = async () => {
+    if (shuttingDown) {
+      console.error("Forcing exit.");
+      process.exit(1);
+    }
+    shuttingDown = true;
     console.log("\nShutting down...");
-    await stopServer();
+    const forceTimer = setTimeout(() => {
+      console.error("Shutdown timed out after 5s, forcing exit.");
+      process.exit(1);
+    }, 5000);
+    forceTimer.unref();
+    try {
+      await stopServer();
+    } catch (err) {
+      console.error("Error during shutdown:", err);
+      process.exit(1);
+    }
     process.exit(0);
   };
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => {
+    void shutdown();
+  });
+  process.on("SIGTERM", () => {
+    void shutdown();
+  });
 }
 
 main().catch((err) => {
