@@ -9,9 +9,34 @@ export interface OpenAIContentBlock {
 }
 
 export interface OpenAIChatMessage {
-  role: "system" | "user" | "assistant";
-  content: string | OpenAIContentBlock[];
+  role: "system" | "developer" | "user" | "assistant" | "tool";
+  content: string | OpenAIContentBlock[] | null;
+  tool_calls?: OpenAIToolCall[];
+  tool_call_id?: string;
+  name?: string;
 }
+
+/**
+ * A client-supplied function tool, as sent in the request `tools` array.
+ */
+export interface OpenAIToolDefinition {
+  type: "function";
+  function: {
+    name: string;
+    description?: string;
+    parameters?: Record<string, unknown>;
+    strict?: boolean;
+  };
+}
+
+/**
+ * The request `tool_choice` field: a mode string, or a pin to one named function.
+ */
+export type OpenAIToolChoice =
+  | "none"
+  | "auto"
+  | "required"
+  | { type: "function"; function: { name: string } };
 
 export interface OpenAIChatRequest {
   model: string;
@@ -23,6 +48,9 @@ export interface OpenAIChatRequest {
   frequency_penalty?: number;
   presence_penalty?: number;
   user?: string; // Used for session mapping
+  tools?: OpenAIToolDefinition[];
+  tool_choice?: OpenAIToolChoice;
+  parallel_tool_calls?: boolean;
 }
 
 export interface OpenAIToolCall {
@@ -48,10 +76,10 @@ export interface OpenAIChatResponseChoice {
   index: number;
   message: {
     role: "assistant";
-    content: string;
+    content: string | null;
     tool_calls?: OpenAIToolCall[];
   };
-  finish_reason: "stop" | "length" | "content_filter" | null;
+  finish_reason: "stop" | "length" | "content_filter" | "tool_calls" | null;
 }
 
 export interface OpenAIChatResponse {
@@ -60,10 +88,18 @@ export interface OpenAIChatResponse {
   created: number;
   model: string;
   choices: OpenAIChatResponseChoice[];
-  usage: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
+  usage: OpenAIUsage;
+}
+
+export interface OpenAIUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  prompt_tokens_details?: {
+    cached_tokens: number;
+  };
+  completion_tokens_details?: {
+    reasoning_tokens: number;
   };
 }
 
@@ -76,7 +112,7 @@ export interface OpenAIChatChunkDelta {
 export interface OpenAIChatChunkChoice {
   index: number;
   delta: OpenAIChatChunkDelta;
-  finish_reason: "stop" | "length" | "content_filter" | null;
+  finish_reason: "stop" | "length" | "content_filter" | "tool_calls" | null;
 }
 
 export interface OpenAIChatChunk {
@@ -85,11 +121,7 @@ export interface OpenAIChatChunk {
   created: number;
   model: string;
   choices: OpenAIChatChunkChoice[];
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
+  usage?: OpenAIUsage;
 }
 
 export interface OpenAIModel {

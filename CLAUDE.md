@@ -11,44 +11,18 @@ npm run dev      # Watch mode for development
 
 ## Service Management
 
-The proxy runs as a macOS LaunchAgent on port 3456.
-
-**Plist location:** `~/Library/LaunchAgents/com.openclaw.claude-max-proxy.plist`
-
-**Logs:**
-- stdout: `~/.openclaw/logs/claude-max-proxy.log`
-- stderr: `~/.openclaw/logs/claude-max-proxy.err.log`
-
-### Restart the service
+The proxy is run by hand in a terminal, listening on http://127.0.0.1:3456. It is not a background service.
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.openclaw.claude-max-proxy
+npm run build    # after any source change
+npm run start    # runs dist/server/standalone.js
 ```
 
-### Stop the service
-
-```bash
-launchctl bootout gui/$(id -u)/com.openclaw.claude-max-proxy
-```
-
-### Start the service (after stop or plist change)
-
-```bash
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.openclaw.claude-max-proxy.plist
-```
-
-### Reload after plist changes
-
-```bash
-launchctl bootout gui/$(id -u)/com.openclaw.claude-max-proxy
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.openclaw.claude-max-proxy.plist
-```
-
-### Check status
-
-```bash
-launchctl list com.openclaw.claude-max-proxy
-```
+- All logs (stdout and stderr) go to that terminal.
+- Stop with Ctrl+C.
+- Restart: Ctrl+C, rebuild if the source changed, then `npm run start` again.
+- Debug logging is off by default. Set `DEBUG` (request lines) or `DEBUG_SUBPROCESS` (CLI spawn args and prompt prefixes) to any non-empty value before `npm run start`; both log prompt fragments.
+- For an optional macOS LaunchAgent that auto-starts the proxy, see the "Running as a macOS LaunchAgent" section in `docs/WORKFLOW.md`.
 
 ## Docs — read before scoping a task
 

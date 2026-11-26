@@ -85,6 +85,10 @@ export interface ClaudeCliResult {
     output_tokens: number;
     cache_creation_input_tokens?: number;
     cache_read_input_tokens?: number;
+    // Thinking tokens, already included in output_tokens.
+    output_tokens_details?: {
+      thinking_tokens?: number;
+    };
   };
   modelUsage: Record<string, {
     inputTokens: number;

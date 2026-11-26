@@ -39,7 +39,7 @@ Your App (OpenClaw, Continue.dev, etc.)
 - **OpenAI-compatible API** — Works with any client that supports OpenAI's API format
 - **Streaming support** — Real-time token streaming via Server-Sent Events
 - **Multiple models** — Claude Opus, Sonnet, and Haiku with flexible model aliases
-- **OpenClaw integration** — Automatic tool name mapping and system prompt adaptation
+- **Client tool calls** — Client `tools` are described to the model, and its tool calls come back as OpenAI `tool_calls`
 - **Content block handling** — Proper text block separators for multi-block responses
 - **Session management** — Maintains conversation context via session IDs
 - **Auto-start service** — Optional LaunchAgent for macOS
@@ -48,8 +48,8 @@ Your App (OpenClaw, Continue.dev, etc.)
 
 ## What's Different from the Original
 
-- **OpenClaw tool mapping** — Maps OpenClaw tool names (`exec`, `read`, `web_search`, etc.) to Claude Code equivalents (`Bash`, `Read`, `WebSearch`)
-- **System prompt stripping** — Removes OpenClaw-specific tooling sections that confuse the CLI
+- **No CLI tools** — The CLI runs as a plain model (no built-in tools, MCP servers or user config). Client tools are passed through the system prompt instead of being mapped to Claude Code tools
+- **Proxy-built system prompt** — Replaces Claude Code's default system prompt with one built from the request's `system` and `developer` messages
 - **Content block support** — Handles `input_text` content blocks and multi-block text separators
 - **Tool call types** — Full OpenAI tool call type definitions for streaming and non-streaming
 - **Improved streaming** — Better SSE handling with connection confirmation and client disconnect detection
@@ -151,7 +151,7 @@ The proxy passes the model ID to the Claude Code CLI exactly as given. `GET /v1/
 
 ### OpenClaw
 
-OpenClaw works with this proxy out of the box. The proxy automatically maps OpenClaw tool names to Claude Code equivalents and strips conflicting tooling sections from system prompts.
+OpenClaw works with this proxy as any OpenAI-compatible client does. Its tools are passed to the model as client tools, and its tool calls are returned in OpenAI format. The proxy does not map OpenClaw tool names to Claude Code tools.
 
 ### Continue.dev
 
@@ -216,7 +216,7 @@ src/
 │   ├── openai-to-cli.ts   # Convert OpenAI requests → CLI format
 │   └── cli-to-openai.ts   # Convert CLI responses → OpenAI format
 ├── subprocess/
-│   └── manager.ts         # Claude CLI subprocess + OpenClaw tool mapping
+│   └── manager.ts         # Claude CLI subprocess and its arguments
 ├── session/
 │   └── manager.ts         # Session ID mapping
 ├── server/
