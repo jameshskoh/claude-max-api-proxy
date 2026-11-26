@@ -51,57 +51,56 @@ export interface SubprocessEvents {
 const DEFAULT_TIMEOUT = 900000; // 15 minutes
 
 /**
- * Resolve the real Claude CLI binary to spawn.
+ * Resolve the real Claude CLI binary to spawn. The result is always spawned
+ * directly, never through a shell.
  *
  * On Windows, the global `claude` command is an npm shim (`claude.cmd`) that
- * just execs a bundled `claude.exe`. Running the shim requires `shell: true`,
- * which routes our argv through cmd.exe — and cmd.exe treats characters our
- * system prompt legitimately contains (`<`, `>`, `(`, `)`, `&`) as
- * redirection/grouping/chaining operators, corrupting the argument list that
- * follows (notably `--session-id`/`--resume`, which silently stop working).
- * Resolving straight to the `.exe` lets us spawn with `shell: false` and
- * skip cmd.exe entirely. Falls back to the shim (with shell:true) if the
- * `.exe` can't be located.
+ * just execs a bundled `claude.exe`. Running the shim requires a shell, and a
+ * shell routes our argv through cmd.exe. cmd.exe treats characters our system
+ * prompt legitimately contains (`<`, `>`, `(`, `)`, `&`) as redirection,
+ * grouping and chaining operators. That corrupts the argument list (notably
+ * the session flags, which silently stop working) and lets request-derived
+ * text inject commands. So on Windows we resolve straight to the `.exe` behind
+ * the shim. If it cannot be located, resolution fails rather than falling back
+ * to the shim; the operator must set CLAUDE_BIN to the full path of claude.exe.
  */
-let resolvedClaudeBin: { bin: string; shell: boolean } | null = null;
+let resolvedClaudeBin: string | null = null;
 
-function resolveClaudeBin(): { bin: string; shell: boolean } {
+export function resolveClaudeBin(platform: NodeJS.Platform = process.platform): string {
   if (process.env.CLAUDE_BIN) {
     // Environment overrides are intentionally not cached. This lets callers
     // temporarily select a binary without contaminating later resolutions.
-    return { bin: process.env.CLAUDE_BIN, shell: false };
+    return process.env.CLAUDE_BIN;
   }
+
+  if (platform !== "win32") return "claude";
 
   if (resolvedClaudeBin) return resolvedClaudeBin;
 
-  if (process.platform === "win32") {
-    try {
-      const where = spawnSync("where.exe", ["claude"], { encoding: "utf8" });
-      const shimPath = (where.stdout || "")
-        .split(/\r?\n/)
-        .map((p) => p.trim())
-        .find((p) => p.toLowerCase().endsWith(".cmd"));
+  try {
+    const where = spawnSync("where.exe", ["claude"], { encoding: "utf8" });
+    const shimPath = (where.stdout || "")
+      .split(/\r?\n/)
+      .map((p) => p.trim())
+      .find((p) => p.toLowerCase().endsWith(".cmd"));
 
-      if (shimPath) {
-        const shimDir = path.dirname(shimPath);
-        const shimContent = readFileSync(shimPath, "utf8");
-        const match = shimContent.match(/"%dp0%\\(.+?\.exe)"/i);
-        if (match) {
-          const exePath = path.join(shimDir, match[1]);
-          resolvedClaudeBin = { bin: exePath, shell: false };
-          return resolvedClaudeBin;
-        }
+    if (shimPath) {
+      const shimDir = path.dirname(shimPath);
+      const shimContent = readFileSync(shimPath, "utf8");
+      const match = shimContent.match(/"%dp0%\\(.+?\.exe)"/i);
+      if (match) {
+        // Only a successful resolution is cached; failures are retried next time.
+        resolvedClaudeBin = path.join(shimDir, match[1]);
+        return resolvedClaudeBin;
       }
-    } catch {
-      // Fall through to shim fallback below
     }
-
-    resolvedClaudeBin = { bin: "claude", shell: true };
-    return resolvedClaudeBin;
+  } catch {
+    // Fall through to the error below
   }
 
-  resolvedClaudeBin = { bin: "claude", shell: false };
-  return resolvedClaudeBin;
+  throw new Error(
+    'Could not find claude.exe behind the npm "claude" shim. Set CLAUDE_BIN to the full path of claude.exe.'
+  );
 }
 
 /**
@@ -184,15 +183,15 @@ export class ClaudeSubprocess extends EventEmitter {
 
     return new Promise((resolve, reject) => {
       try {
-        // Use spawn() for security - no shell interpretation
-        const { bin, shell } = resolveClaudeBin();
+        // Use spawn() for security - no shell interpretation. A resolution
+        // failure throws here and becomes a rejection of start().
+        const bin = resolveClaudeBin();
         this.process = spawn(bin, args, {
           cwd: options.cwd || defaultCliCwd(),
           env: Object.fromEntries(
             Object.entries(process.env).filter(([k]) => k !== "CLAUDECODE")
           ),
           stdio: ["pipe", "pipe", "pipe"],
-          shell,
         });
 
         this.armTimeout(timeout);
@@ -406,8 +405,14 @@ export class ClaudeSubprocess extends EventEmitter {
  */
 export async function verifyClaude(): Promise<{ ok: boolean; error?: string; version?: string }> {
   return new Promise((resolve) => {
-    const { bin, shell } = resolveClaudeBin();
-    const proc = spawn(bin, ["--version"], { stdio: "pipe", shell });
+    let bin: string;
+    try {
+      bin = resolveClaudeBin();
+    } catch (err) {
+      resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+    const proc = spawn(bin, ["--version"], { stdio: "pipe" });
     let output = "";
 
     proc.stdout?.on("data", (chunk: Buffer) => {

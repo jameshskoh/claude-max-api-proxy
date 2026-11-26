@@ -3,8 +3,13 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { after, afterEach, before, describe, it } from "node:test";
-import { ClaudeSubprocess, defaultCliCwd, type SubprocessOptions } from "./manager.js";
+import { after, afterEach, before, beforeEach, describe, it } from "node:test";
+import {
+  ClaudeSubprocess,
+  defaultCliCwd,
+  resolveClaudeBin,
+  type SubprocessOptions,
+} from "./manager.js";
 
 const WINDOWS_ONLY = process.platform !== "win32";
 const WAIT_TIMEOUT_MS = 5_000;
@@ -315,6 +320,34 @@ describe("Windows process-tree termination", { skip: WINDOWS_ONLY }, () => {
     testable.buildArgs = () => [fixturePath];
     return subprocess;
   }
+});
+
+describe("CLI binary resolution", { skip: process.platform === "win32" }, () => {
+  let previousClaudeBin: string | undefined;
+
+  beforeEach(() => {
+    previousClaudeBin = process.env.CLAUDE_BIN;
+  });
+
+  afterEach(() => {
+    restoreEnvironmentVariable("CLAUDE_BIN", previousClaudeBin);
+  });
+
+  it("fails on win32 without CLAUDE_BIN and tells the operator to set it", () => {
+    delete process.env.CLAUDE_BIN;
+    assert.throws(() => resolveClaudeBin("win32"), /CLAUDE_BIN/);
+  });
+
+  it("returns CLAUDE_BIN on every platform when it is set", () => {
+    process.env.CLAUDE_BIN = "/custom/claude";
+    assert.equal(resolveClaudeBin("win32"), "/custom/claude");
+    assert.equal(resolveClaudeBin("darwin"), "/custom/claude");
+  });
+
+  it("resolves to the bare claude command off win32 without CLAUDE_BIN", () => {
+    delete process.env.CLAUDE_BIN;
+    assert.equal(resolveClaudeBin("darwin"), "claude");
+  });
 });
 
 describe("stdout tail and timeout handling without an error listener", () => {
