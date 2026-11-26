@@ -2,7 +2,7 @@
 
 - **Status:** Accepted, with known issues
 - **Introduced:** 78fcbaf, 2026-02-18, Krzysztof Wende
-- **Revised:** 2026-11-26
+- **Revised:** 2026-11-27
 
 ## Context
 
@@ -40,7 +40,6 @@
 - **Good:**
   - Clients get real `tool_calls` in the format they expect.
   - The model cannot run commands or touch files, because the CLI has no tools.
-  - No OpenClaw-specific prompt is sent.
   - A reply with a broken block is returned whole, as text, rather than as the calls that parsed. Keeping only the good calls could lose work silently. Say the call that records a finding is broken, but the call that marks the review done is fine. The client would see a finished review with the finding missing, while the reply text says the finding was recorded. Returned as text, the reply shows the client that no call was made, so it can re-prompt. A real client did re-prompt this way and the model corrected itself.
 - **Bad:**
   - Tool calls are parsed from text. A formatting slip by the model becomes a plain text reply with `finish_reason` `stop`, not a tool call.

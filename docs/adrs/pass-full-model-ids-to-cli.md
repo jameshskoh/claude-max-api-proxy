@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Introduced:** 0a70bdd, 2026-01-25, Atal Agarwal
-- **Revised:** 2026-11-23
+- **Revised:** 2026-11-27
 
 ## Context
 
@@ -25,11 +25,10 @@ The CLI's `--model` takes a full model name as well as an alias. Clients name a 
   - One list feeds validation, `/v1/models` and the e2e test.
 - **Bad:**
   - When the CLI adds or retires a model, the list must be edited and the ID re-checked against the CLI.
-  - The plugin's advertised models are a separate list.
 
 ## Affected components
 
-The request adapter, which holds the supported-model list and the check; request validation and the models endpoint in the request handlers; both response paths, which report the requested ID; the subprocess manager, which passes the ID to `--model`; and the plugin entry's advertised list.
+The request adapter, which holds the supported-model list and the check; request validation and the models endpoint in the request handlers; both response paths, which report the requested ID; the subprocess manager, which passes the ID to `--model`.
 
 ## Revisit when
 

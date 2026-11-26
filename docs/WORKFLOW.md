@@ -26,17 +26,13 @@ flowchart TD
 - Stopping the server closes the listener and waits for open connections. An in-flight streaming response delays exit (inferred, not tested).
 - Shutdown does not signal CLI children itself. Run by hand, a running `claude` can outlive the server. Under launchd, stopping the job also kills the rest of its process group unless the plist sets `AbandonProcessGroup`, so children are normally cleaned up (inferred, not tested).
 
-**Plugin path (not how the proxy is normally run)**
-
-The plugin entry registers a provider. The provider's auth flow repeats the CLI and auth checks, asks for a port, starts the server, and returns a config that points the host at `http://127.0.0.1:<port>/v1`. The plugin's unload hook stops the server. Nothing in the LaunchAgent setup uses this path.
-
 ## 2. Request pipeline
 
 Each HTTP request passes these steps in order.
 
-1. **Body parsing** (HTTP app). Bodies whose `Content-Type` is `application/json` are buffered raw (10 MB limit) and then parsed with `JSON.parse`. A parse failure goes to the error handler, which returns **500**, not 400.
-2. **Debug log.** Prints method and path when `DEBUG` is set.
-3. **CORS headers** on every response. `OPTIONS` gets 200 before any route runs.
+1. **Host check** (HTTP app). A request whose Host is not a local name (localhost, `127.0.0.1`, `::1`, or the bind host) gets **403** with error code `forbidden_host`. Nothing after this step runs for it.
+2. **Body parsing** (HTTP app). Bodies whose `Content-Type` is `application/json` are buffered raw (10 MB limit) and then parsed with `JSON.parse`. A parse failure goes to the error handler, which returns **500**, not 400.
+3. **Debug log.** Prints method and path when `DEBUG` is set.
 4. **Routing**: `GET /health`, `GET /v1/models`, `POST /v1/chat/completions`. Anything else gets a JSON 404.
 5. **Chat completions handler** (request handlers). Makes a 24-character request ID. Streaming is on only when `stream` is exactly `true`.
 6. **Validation.** `messages` must be a non-empty array, otherwise 400 `invalid_messages`.
@@ -46,7 +42,7 @@ Each HTTP request passes these steps in order.
 10. **Branch.** `stream: true` takes the streaming path. Otherwise the non-streaming path runs.
 11. **Outer catch.** A synchronous throw becomes a 500, unless headers were already sent.
 
-Steps 5 and later write the request summary line described in the dev loop section, whatever the outcome. A request that fails before step 5, such as an unparseable body or an unknown path, gets no summary line; the body parser prints its own error instead.
+Steps 5 and later write the request summary line described in the dev loop section, whatever the outcome. A request that fails before step 5, such as a forbidden Host, an unparseable body or an unknown path, gets no summary line. A body parse failure prints its own error.
 
 **Gotchas**
 
@@ -67,7 +63,7 @@ The subprocess manager wraps one CLI child and reports what it does as events. I
 5. **Prompt on stdin.** The user prompt is written and stdin is closed. Sending it on stdin avoids `E2BIG` on large inputs. The system prompt goes on the command line instead, so it does not get the same protection.
 6. **stdout.** Chunks are appended to a buffer, split on newlines, and the last partial line is kept for the next chunk. Each line is trimmed and parsed as JSON. Lines that do not parse are emitted as `raw`.
 7. **stderr.** Logged only when `DEBUG_SUBPROCESS` is set. Never emitted as an event.
-8. **Exit.** Clears the timer, parses any leftover buffer, and emits `close` with the exit code.
+8. **Exit.** Clears the timer, parses any leftover buffer (a last line with no trailing newline is parsed too), and emits `close` with the exit code.
 9. **Resolve.** Start resolves right after the spawn call returns, before the process has done anything. A spawn failure is reported later, as an `error` event (see the spawn failure note).
 
 **Events emitted by the subprocess**
@@ -123,7 +119,7 @@ sequenceDiagram
   alt result was kept
     R->>R: save the session if keyed
     R->>R: with active tools, split the text into content and tool calls
-    R-->>C: 200 JSON built from the result, model is the requested ID
+    R-->>C: 200 JSON built from the result, model is the requested ID, or 500 when the result has is_error
   else no result
     R->>R: clear the session if resuming
     R-->>C: 500 exited without response
@@ -136,6 +132,7 @@ sequenceDiagram
 
 - If the client leaves before the reply is written, the CLI is killed and the summary line is written as `aborted`. If the CLI still produces a result, that result is dropped: it is not sent or saved as a session, and a resumed session is cleared, because it would hold a reply the client never got. The kill and the `aborted` line were checked on a live server; the late-result case is inferred from code.
 - Non-streaming does not use `assistant` events. The response is built from the `result` message alone.
+- A result with `is_error` true is not a reply. Non-streaming sends 500 with the CLI's message; streaming sends an error line and `[DONE]`. The session is still saved for that turn when the client is still connected, so the next turn resumes after the failed one. The message is the result text, else the CLI's error list, else the subtype.
 - With active tools, the body is a tool-call reply when blocks parse: `content` is the leftover text or null, `tool_calls` is set, and `finish_reason` is `tool_calls`. If any block is malformed, the body is the plain text with `stop`, and a warning is logged.
 - The reply's `model` is the requested ID with any provider prefix removed, not a name reported by the CLI.
 
@@ -169,6 +166,7 @@ sequenceDiagram
     R-->>C: chunk with tool_calls
   end
   R-->>C: done chunk with usage and finish reason, then DONE marker, then end
+  Note over R: an is_error result sends an error line and DONE instead of the chunks above
 ```
 
 **Wire output (abbreviated, 4 lines; real output has a blank line after each event)**
@@ -185,6 +183,7 @@ data: [DONE]
 - **Client disconnects before completion**: the response's `close` event kills the subprocess. The handler listens on the response rather than the request, because the request's `close` fires as soon as the body is read.
 - **Child exits non-zero with no result**: clears the session if resuming, writes an error line `Process exited with code <n>`, then `[DONE]`, then ends. A null code (killed by signal) also takes this path.
 - **Child exits 0 with no result**: writes `[DONE]` and ends, with no error line (inferred from code).
+- **Error result** (`is_error` true): saves the session if keyed, writes an error line with the CLI's message, then `[DONE]`, then ends. No usage or done chunk is sent. Logged as `finish=error`.
 - **Timeout error**: clears the session if resuming, writes an error line, ends. No `[DONE]`.
 - **Spawn failure** (missing CLI, or a start that throws): clears the session if resuming, writes one error line, ends. No `[DONE]`. Logged as `finish=error`.
 - **Active tools, reply has valid tool-call blocks**: the leftover text (if any) is one content chunk, then one chunk with all the `tool_calls`, then the done chunk with finish reason `tool_calls`.
@@ -225,11 +224,9 @@ stateDiagram-v2
 - **Restart**: the map starts empty. CLI transcripts stay under `~/.claude/projects/`. Nothing in the proxy deletes them.
 - **Client disconnect while resuming** clears the session, because the streaming close handler runs before the turn is marked complete (inferred from code).
 - **Overlapping requests** with the same `user` are not serialized. Both can `--resume` the same session (inferred, not tested).
-- The legacy session manager is a separate library-level session map. The request handlers do not use it.
-
 ## 6. Timeouts, disconnects, kill
 
-- **Timeout.** After 15 minutes, the subprocess manager sends SIGTERM through the kill path (the whole tree only on Windows) if the process is not already killed. It then emits `error` with `Request timed out after 900000ms`. The error listener sends the error reply and clears the session if resuming.
+- **Timeout.** After 15 minutes, the subprocess manager sends SIGTERM through the kill path (the whole tree only on Windows) if the process is not already killed. It then emits `error` with `Request timed out after 900000ms`. The error listener sends the error reply and clears the session if resuming. If nothing listens for `error`, the timer still stops the process but emits nothing, so it cannot crash the process. The request handlers always listen.
 - **Streaming disconnect.** The response's `close` event kills the subprocess. The child exits with a null code and the close listener runs its failure branch. Nothing else happens; the request is not retried.
 - **Non-streaming disconnect.** Before the reply is written, the response's `close` event kills the subprocess and the summary line is written as `aborted`. A result that arrives after that is dropped, and a resumed session is cleared. The kill and the `aborted` line were checked on a live server; the late-result case is inferred from code.
 - **Kill, Windows.** `taskkill /PID <pid> /T /F` removes the whole process tree. If taskkill fails, the code signals only the root process and reports the kill as not done, so the caller can retry.
@@ -300,9 +297,9 @@ Both debug flags log prompt fragments, so keep them off in normal use.
 
 This section replaces the old `docs/macos-setup.md` (removed after commit `2074263`), which used the label `com.claude-code-provider` and logged to `/tmp`. This section is optional and is an example setup. The plist is not in this repo, so write it yourself and change the label, paths and user to match your machine. The normal way to run the proxy is `npm start`.
 
-- **Label:** `com.openclaw.claude-max-proxy`
-- **Plist:** `~/Library/LaunchAgents/com.openclaw.claude-max-proxy.plist`
-- **Logs:** `~/.openclaw/logs/claude-max-proxy.log` (stdout) and `~/.openclaw/logs/claude-max-proxy.err.log` (stderr)
+- **Label:** `local.claude-max-proxy`
+- **Plist:** `~/Library/LaunchAgents/local.claude-max-proxy.plist`
+- **Logs:** `~/Library/Logs/claude-max-proxy/claude-max-proxy.log` (stdout) and `~/Library/Logs/claude-max-proxy/claude-max-proxy.err.log` (stderr)
 
 **Before loading**
 
@@ -310,7 +307,7 @@ This section replaces the old `docs/macos-setup.md` (removed after commit `20742
 2. Create the log folder. launchd does not create it, and the job will not start without it:
 
    ```bash
-   mkdir -p ~/.openclaw/logs
+   mkdir -p ~/Library/Logs/claude-max-proxy
    ```
 
 3. Find the paths to fill into the plist:
@@ -329,7 +326,7 @@ This section replaces the old `docs/macos-setup.md` (removed after commit `20742
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.openclaw.claude-max-proxy</string>
+  <string>local.claude-max-proxy</string>
 
   <!-- Absolute path to node (output of which node), then the built server, then the port -->
   <key>ProgramArguments</key>
@@ -359,9 +356,9 @@ This section replaces the old `docs/macos-setup.md` (removed after commit `20742
   <true/>
 
   <key>StandardOutPath</key>
-  <string>/Users/YOU/.openclaw/logs/claude-max-proxy.log</string>
+  <string>/Users/YOU/Library/Logs/claude-max-proxy/claude-max-proxy.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/YOU/.openclaw/logs/claude-max-proxy.err.log</string>
+  <string>/Users/YOU/Library/Logs/claude-max-proxy/claude-max-proxy.err.log</string>
 </dict>
 </plist>
 ```
@@ -369,13 +366,13 @@ This section replaces the old `docs/macos-setup.md` (removed after commit `20742
 **Commands**
 
 ```bash
-plutil -lint ~/Library/LaunchAgents/com.openclaw.claude-max-proxy.plist          # check the plist syntax
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.openclaw.claude-max-proxy.plist   # start
-launchctl list com.openclaw.claude-max-proxy                                     # status and last exit code
-curl -s http://127.0.0.1:3456/health                                             # check it answers
-launchctl kickstart -k gui/$(id -u)/com.openclaw.claude-max-proxy                # restart with the same plist
-launchctl bootout gui/$(id -u)/com.openclaw.claude-max-proxy                     # stop
-tail -f ~/.openclaw/logs/claude-max-proxy.err.log                                # follow errors
+plutil -lint ~/Library/LaunchAgents/local.claude-max-proxy.plist                      # check the plist syntax
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.claude-max-proxy.plist  # start
+launchctl list local.claude-max-proxy                                                 # status and last exit code
+curl -s http://127.0.0.1:3456/health                                                  # check it answers
+launchctl kickstart -k gui/$(id -u)/local.claude-max-proxy                            # restart with the same plist
+launchctl bootout gui/$(id -u)/local.claude-max-proxy                                 # stop
+tail -f ~/Library/Logs/claude-max-proxy/claude-max-proxy.err.log                      # follow errors
 ```
 
 After any plist change, run `bootout`, then `bootstrap`. `kickstart` does not reread the plist.
@@ -383,8 +380,8 @@ After any plist change, run `bootout`, then `bootstrap`. `kickstart` does not re
 **Uninstall**
 
 ```bash
-launchctl bootout gui/$(id -u)/com.openclaw.claude-max-proxy
-rm ~/Library/LaunchAgents/com.openclaw.claude-max-proxy.plist
+launchctl bootout gui/$(id -u)/local.claude-max-proxy
+rm ~/Library/LaunchAgents/local.claude-max-proxy.plist
 ```
 
 **Troubleshooting**
@@ -399,10 +396,10 @@ rm ~/Library/LaunchAgents/com.openclaw.claude-max-proxy.plist
 
 **Security**
 
-The service has no authentication, sends `Access-Control-Allow-Origin: *`, and passes the CLI's skip-permissions flag. The CLI runs with no built-in tools, so a request cannot make it run shell commands or edit files on this machine; the skip flag guards nothing in practice. Read [bad-coding-practices section 3](security-review/bad-coding-practices.md#3-gotchas-if-you-dont-change-the-code) before you load it.
+The service has no authentication, sends no CORS headers and accepts only local Host names, and passes the CLI's skip-permissions flag. The CLI runs with no built-in tools, so a request cannot make it run shell commands or edit files on this machine; the skip flag guards nothing in practice. Read [bad-coding-practices section 3](security-review/bad-coding-practices.md#3-gotchas-if-you-dont-change-the-code) before you load it.
 
 - If the service is loaded, stop it (`bootout`) when you are not using it.
 - Never expose port 3456 beyond loopback.
 - Keep `DEBUG` and `DEBUG_SUBPROCESS` unset, and keep logs out of `/tmp`.
 - See [telemetry.md](security-review/telemetry.md) for what the CLI sends and which variables turn it off.
-- The server's loopback-only design and its open CORS policy are recorded in [localhost-only-no-auth-open-cors](adrs/localhost-only-no-auth-open-cors.md).
+- The server's loopback-only design and its Host allowlist are recorded in [localhost-only-no-auth-host-allowlist](adrs/localhost-only-no-auth-host-allowlist.md).

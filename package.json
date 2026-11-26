@@ -24,7 +24,6 @@
     "openai-compatible",
     "api-server",
     "oauth",
-    "clawdbot",
     "llm",
     "ai"
   ],
@@ -47,14 +46,6 @@
     "@types/node": "^22.10.7",
     "@types/uuid": "^10.0.0",
     "typescript": "^5.7.3"
-  },
-  "peerDependencies": {
-    "clawdbot": ">=2026.1.0"
-  },
-  "peerDependenciesMeta": {
-    "clawdbot": {
-      "optional": true
-    }
   },
   "engines": {
     "node": ">=20"

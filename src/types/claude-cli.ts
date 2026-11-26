@@ -70,14 +70,14 @@ export interface ClaudeCliAssistant {
   uuid: string;
 }
 
-export interface ClaudeCliResult {
+/** Fields every result message carries, whatever its outcome. */
+interface ClaudeCliResultBase {
   type: "result";
-  subtype: "success" | "error";
+  // is_error is the authoritative flag: an API error can come with subtype "success" and is_error true.
   is_error: boolean;
   duration_ms: number;
   duration_api_ms: number;
   num_turns: number;
-  result: string;
   session_id: string;
   total_cost_usd: number;
   usage: {
@@ -96,6 +96,19 @@ export interface ClaudeCliResult {
     costUSD: number;
   }>;
 }
+
+export interface ClaudeCliResultSuccess extends ClaudeCliResultBase {
+  subtype: "success";
+  result: string;
+}
+
+export interface ClaudeCliResultError extends ClaudeCliResultBase {
+  subtype: "error_max_turns" | "error_during_execution" | (string & {});
+  result?: string;
+  errors?: string[];
+}
+
+export type ClaudeCliResult = ClaudeCliResultSuccess | ClaudeCliResultError;
 
 export interface ClaudeCliSystemMessage {
   type: "system";

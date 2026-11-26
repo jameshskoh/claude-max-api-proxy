@@ -16,10 +16,56 @@ export interface ServerConfig {
 let serverInstance: Server | null = null;
 
 /**
- * Create and configure the Express app
+ * Lower-cased hostname from a Host header value, without the port or IPv6 brackets.
+ * Returns null when the header is missing or malformed.
  */
-function createApp(): Express {
+function hostnameFromHeader(host: string | undefined): string | null {
+  if (!host) {
+    return null;
+  }
+  const trimmed = host.trim();
+  let hostname: string;
+  if (trimmed.startsWith("[")) {
+    const end = trimmed.indexOf("]");
+    if (end === -1) {
+      return null;
+    }
+    hostname = trimmed.slice(1, end);
+  } else {
+    const colon = trimmed.indexOf(":");
+    hostname = colon === -1 ? trimmed : trimmed.slice(0, colon);
+  }
+  return hostname.toLowerCase() || null;
+}
+
+/**
+ * Create and configure the Express app. bindHost is the address the server listens on.
+ */
+function createApp(bindHost: string): Express {
   const app = express();
+
+  const allowedHosts = new Set([
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    bindHost.trim().toLowerCase().replace(/^\[(.*)\]$/, "$1"),
+  ]);
+
+  // Blocks DNS rebinding: only requests addressed to a local hostname are served.
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const hostname = hostnameFromHeader(req.headers.host);
+    if (!hostname || !allowedHosts.has(hostname)) {
+      res.status(403).json({
+        error: {
+          message: "Forbidden host",
+          type: "invalid_request_error",
+          code: "forbidden_host",
+        },
+      });
+      return;
+    }
+    next();
+  });
 
   // Middleware: use raw body parser + manual JSON parse for better error diagnostics
   app.use(express.raw({ type: "application/json", limit: "10mb" }));
@@ -55,19 +101,6 @@ function createApp(): Express {
       console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
     }
     next();
-  });
-
-  // CORS headers for local development
-  app.use((_req: Request, res: Response, next: NextFunction) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    next();
-  });
-
-  // Handle OPTIONS preflight
-  app.options("*", (_req: Request, res: Response) => {
-    res.sendStatus(200);
   });
 
   // Routes
@@ -112,7 +145,7 @@ export async function startServer(config: ServerConfig): Promise<Server> {
     return serverInstance;
   }
 
-  const app = createApp();
+  const app = createApp(host);
 
   return new Promise((resolve, reject) => {
     serverInstance = createServer(app);

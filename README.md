@@ -1,10 +1,10 @@
 # Claude Max API Proxy
 
-> Actively maintained fork of [atalovesyou/claude-max-api-proxy](https://github.com/atalovesyou/claude-max-api-proxy) with OpenClaw integration, improved streaming, and expanded model support.
+> Actively maintained fork of [atalovesyou/claude-max-api-proxy](https://github.com/atalovesyou/claude-max-api-proxy) with improved streaming and expanded model support.
 
 **Use your existing Claude Code subscription (Pro, Max, or Team) with any OpenAI-compatible client — no separate API costs!**
 
-This proxy wraps the Claude Code CLI as a subprocess and exposes an OpenAI-compatible HTTP API, allowing tools like OpenClaw, Continue.dev, or any OpenAI-compatible client to use your Claude subscription instead of paying per-API-call. It works with any subscription tier that Claude Code itself supports — Pro, Max, or Team — not just Max.
+This proxy wraps the Claude Code CLI as a subprocess and exposes an OpenAI-compatible HTTP API, allowing tools like Continue.dev, or any OpenAI-compatible client to use your Claude subscription instead of paying per-API-call. It works with any subscription tier that Claude Code itself supports — Pro, Max, or Team — not just Max.
 
 ## Why This Exists
 
@@ -19,7 +19,7 @@ Anthropic blocks OAuth tokens from being used directly with third-party API clie
 ## How It Works
 
 ```
-Your App (OpenClaw, Continue.dev, etc.)
+Your App (Continue.dev, any OpenAI client)
          ↓
     HTTP Request (OpenAI format)
          ↓
@@ -149,10 +149,6 @@ The proxy passes the model ID to the Claude Code CLI exactly as given. `GET /v1/
 
 ## Configuration with Popular Tools
 
-### OpenClaw
-
-OpenClaw works with this proxy as any OpenAI-compatible client does. Its tools are passed to the model as client tools, and its tool calls are returned in OpenAI format. The proxy does not map OpenClaw tool names to Claude Code tools.
-
 ### Continue.dev
 
 Add to your Continue config:
@@ -189,20 +185,20 @@ response = client.chat.completions.create(
 
 The proxy can run as a macOS LaunchAgent on port 3456.
 
-**Plist location:** `~/Library/LaunchAgents/com.openclaw.claude-max-proxy.plist`
+**Plist location:** `~/Library/LaunchAgents/local.claude-max-proxy.plist`
 
 ```bash
 # Start the service
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.openclaw.claude-max-proxy.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.claude-max-proxy.plist
 
 # Restart
-launchctl kickstart -k gui/$(id -u)/com.openclaw.claude-max-proxy
+launchctl kickstart -k gui/$(id -u)/local.claude-max-proxy
 
 # Stop
-launchctl bootout gui/$(id -u)/com.openclaw.claude-max-proxy
+launchctl bootout gui/$(id -u)/local.claude-max-proxy
 
 # Check status
-launchctl list com.openclaw.claude-max-proxy
+launchctl list local.claude-max-proxy
 ```
 
 ## Architecture
@@ -217,8 +213,6 @@ src/
 │   └── cli-to-openai.ts   # Convert CLI responses → OpenAI format
 ├── subprocess/
 │   └── manager.ts         # Claude CLI subprocess and its arguments
-├── session/
-│   └── manager.ts         # Session ID mapping
 ├── server/
 │   ├── index.ts           # Express server setup
 │   ├── routes.ts          # API route handlers
@@ -268,5 +262,4 @@ MIT
 ## Acknowledgments
 
 - Originally created by [atalovesyou](https://github.com/atalovesyou/claude-max-api-proxy)
-- Built for use with [OpenClaw](https://openclaw.com)
 - Powered by [Claude Code CLI](https://github.com/anthropics/claude-code)
