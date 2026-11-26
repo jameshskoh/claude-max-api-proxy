@@ -8,16 +8,14 @@ Runtime flows are in [WORKFLOW.md](WORKFLOW.md), and the reasons for design choi
 
 **Problem.** A Claude subscription (Pro, Max or Team) does not work through the normal API, because its OAuth token is scope-restricted (old `DESIGN.md`). The proxy gets around this by running the official `claude` CLI, which holds the subscription login, and presenting its output as an OpenAI-compatible HTTP API.
 
-**Users.** One person on one machine. Any OpenAI-compatible client that can reach `127.0.0.1:3456` works, including clients that send their own tools, as long as it addresses the server by a local name (see the Host check). OpenClaw was the original main client. There is no multi-user mode.
+**Users.** One person on one machine. Any OpenAI-compatible client that can reach `127.0.0.1:3456` works, including clients that send their own tools, as long as it addresses the server by a local name (see the Host check). There is no multi-user mode.
 
 **Category.** A local OpenAI-compatible server in front of the Claude CLI, run as a plain language model. The CLI has no built-in tools, no MCP servers and no user or project configuration. A request is a chat: the client gets back the model's text. Tools are the client's: the proxy describes the client's tools to the model, and when the model asks for one, the proxy returns that as an OpenAI tool call. The proxy runs no tools itself.
 
 **Non-obvious points**
 
-- The fork was once tuned for OpenClaw. Its prompt adaptation (stripping OpenClaw sections, mapping OpenClaw tool names to Claude Code tools) has been removed. Client tools are now passed to the model as text in a proxy-built system prompt. See [run-cli-as-plain-llm-with-prompt-tool-calls](adrs/run-cli-as-plain-llm-with-prompt-tool-calls.md).
 - Security effect: the CLI cannot run shell commands, edit files or fetch URLs on this machine, because it has no tools. The skip-permissions flag is still passed, but with no tools it guards nothing in practice.
-- It was designed as a Clawdbot provider plugin (old `DESIGN.md`), but it runs as a standalone server, normally started by hand. An optional macOS LaunchAgent can start it automatically. The plugin entry still exists. The plist is not in this repo; see [WORKFLOW.md](WORKFLOW.md#running-as-a-macos-launchagent).
-- Clawdbot's provider system handles authentication only, not API execution (old root `ARCHITECTURE.md`). So this proxy is a local endpoint that the provider's base URL points at, not a backend inside Clawdbot. See [local-openai-proxy-over-clawdbot-backend](adrs/local-openai-proxy-over-clawdbot-backend.md).
+- It runs as a standalone local HTTP server, normally started by hand. An optional macOS LaunchAgent can start it automatically. The plist is not in this repo; see [WORKFLOW.md](WORKFLOW.md#running-as-a-macos-launchagent). The decision is in [run-as-standalone-openai-compatible-server](adrs/run-as-standalone-openai-compatible-server.md).
 - The CLI keeps the credentials in the OS keychain. The proxy never reads them. Old `DESIGN.md` says `~/.claude/credentials.json`, which is stale.
 - `total_cost_usd` in the CLI result is subscription usage, not API billing (old `PROTOCOL.md`). The proxy does not read it.
 
@@ -72,7 +70,6 @@ Runtime flows are in [WORKFLOW.md](WORKFLOW.md), and the reasons for design choi
 **Planned in the old design, never built**
 
 - A process pool, a request queue and `maxConcurrent`. Every request spawns its own process with no limit.
-- Plugin config options such as `timeout`, `maxConcurrent`, `sessionPersistence`, `debugMode` and `cwd`. The plugin's config schema is empty.
 - Separate middleware, health and stream modules. Streaming logic lives in the request handlers.
 - Native tool use through the CLI's own tool protocol. Client tools reach the model only as prompt text, and calls come back as text (see Client tool calling).
 - Cost tracking, model routing, response caching and multi-user support.
@@ -106,8 +103,6 @@ Runtime flows are in [WORKFLOW.md](WORKFLOW.md), and the reasons for design choi
 | Proxy internals | Active tools | A request with non-empty `tools` and a `tool_choice` other than `"none"`. Only these get the tool catalog and tool-call parsing. |
 | Proxy internals | Tool-call block | The tagged JSON the model writes at the end of its reply to request a call. Parsed into a tool call. |
 | Proxy internals | Tool-result block | The tagged wrapper that carries a client tool's output into the next prompt. |
-| Host apps | OpenClaw | The original main client. Its prompt adaptation has been removed, but the example LaunchAgent label in the optional setup in [WORKFLOW.md](WORKFLOW.md#running-as-a-macos-launchagent) still says `openclaw`. |
-| Host apps | Clawdbot | The host the original plugin targeted (old `DESIGN.md`). `clawdbot` is an optional peer dependency. This doc does not say whether Clawdbot and OpenClaw are the same project. Treat them as separate names. |
 
 **How these connect**
 
@@ -117,7 +112,6 @@ Runtime flows are in [WORKFLOW.md](WORKFLOW.md), and the reasons for design choi
 
 **Easily confused**
 
-- The **legacy session manager** is file-backed (`~/.claude-code-cli-sessions.json`), keyed by a Clawdbot conversation ID, with a 24-hour TTL. The library entry exports it, but the server never uses it.
 - The **session store** is the one the server uses. It is in memory, keyed by `user`, with a 6-hour TTL.
 - A **tool call** in the OpenAI sense is not a CLI `tool_use` block. The CLI never makes one here, because it has no tools. The proxy finds the call in the model's text.
 
@@ -126,7 +120,6 @@ Runtime flows are in [WORKFLOW.md](WORKFLOW.md), and the reasons for design choi
 ```mermaid
 flowchart LR
   SA[Standalone entry] --> APP[HTTP app]
-  PI[Plugin entry] --> APP
   APP --> RH[Request handlers]
   RH --> RQ[Request adapter]
   RQ --> TP[Tool protocol]
@@ -137,7 +130,6 @@ flowchart LR
   CLI -->|stdout stream-json| SP
   SP -->|events| RH
   RH --> RS[Response adapter]
-  PI -.->|re-exports| LEG[Legacy session manager<br/>unused by server]
 ```
 
 This table is the one place that maps components to files. The rest of the docs use the component names.
@@ -145,7 +137,7 @@ This table is the one place that maps components to files. The rest of the docs 
 | Component | File | Responsibility |
 |---|---|---|
 | Standalone entry | `src/server/standalone.ts` | What runs. Parses the port, runs the startup checks, starts the server, handles SIGINT and SIGTERM. |
-| Plugin entry | `src/index.ts` | Clawdbot provider plugin, the models it advertises, and the library exports. |
+| Library entry | `src/index.ts` | Re-exports the HTTP server and CLI helpers for use as a library. |
 | HTTP app | `src/server/index.ts` | Express app: Host check, body parsing, debug log, routing, 404, error handler, listen and stop. |
 | Request handlers | `src/server/routes.ts` | Chat completions (validation, model check, session resolution, streaming and non-streaming paths, and tool-call handling when tools are active), models, health. Also decides when each chat-completion request has finished, for the summary line. |
 | Request log | `src/server/request-log.ts` | Formats the one-line summary written for each chat-completion request, from fields the request handlers collect. Formatting only. |
@@ -154,22 +146,18 @@ This table is the one place that maps components to files. The rest of the docs 
 | Response adapter | `src/adapter/cli-to-openai.ts` | Builds the non-streaming body (with `tool_calls` when present) and the streaming chunks: text deltas, the tool-call chunk and the done chunk. |
 | Subprocess manager | `src/subprocess/manager.ts` | Finds the CLI binary, builds arguments (the no-tools flags and the system prompt), spawns, parses stdout into events, times out and kills. Holds the startup checks. |
 | Session store | `src/subprocess/session-store.ts` | In-memory `user` to CLI session map with TTL. |
-| Legacy session manager | `src/session/manager.ts` | Old file-backed session map. Not used by the server. |
 | Types | `src/types/` | OpenAI request and response shapes (including tools and tool calls), CLI stream-json message shapes and type guards. |
 | Tests | `src/**/*.test.ts` | An end-to-end test against the real CLI, Windows-only process-tree tests, a missing-binary spawn test, and unit tests for the model check. See [WORKFLOW.md](WORKFLOW.md#tests). |
 
 **Entry points**
 
 - The **standalone entry** is what runs. The build output is `dist/server/standalone.js`. It is the `bin` target and the `npm start` script.
-- The **plugin entry** registers provider `claude-code-cli` with aliases `claude-cli` and `claude-max`. Its auth flow asks for a port, starts the server and returns a base URL of `http://127.0.0.1:<port>/v1`. It also registers the `claude-cli:start`, `claude-cli:stop` and `claude-cli:status` commands.
-- **Import side effects.** Importing the library loads the legacy session manager. At import time that module reads `~/.claude-code-cli-sessions.json` and starts an hourly timer that is not `unref`'d, which keeps a process alive. Importing the library is therefore not free. Do not add more side effects to the plugin entry.
 
-**Model lists live in 2 places**
+**The model list lives in one place**
 
 - The **supported-model list** in the request adapter. It drives validation, `GET /v1/models` and the 404 message. The e2e test compares `/v1/models` against it, so the test needs no edit when the list changes.
-- The **advertised list** in the plugin entry: the few models the plugin's config patch offers OpenClaw. It is not used for validation.
 
-Adding a model means adding it to the supported-model list and checking the ID against the CLI. Change the advertised list only if the plugin should offer it.
+Adding a model means adding it to the supported-model list and checking the ID against the CLI.
 
 **Where to start reading**
 
@@ -254,7 +242,7 @@ With active tools, no text reaches the client until the CLI run ends. After that
 
 | Setting | Default | Notes |
 |---|---|---|
-| Port (first CLI argument) | 3456 | The only CLI argument. The plugin asks for it during setup. Not an env var. |
+| Port (first CLI argument) | 3456 | The only CLI argument. Not an env var. |
 | Host | `127.0.0.1` | Library callers of the server start function can pass a host. Nothing in the repo does, and there is no CLI or env option. Its value is also accepted in the Host check. |
 | `DEBUG` | off | Logs request lines and body prefixes (200 and 300 characters). |
 | `DEBUG_SUBPROCESS` | off | Logs CLI arguments (which include the system prompt), a 200-character prompt prefix, stdout sizes and stderr. |
@@ -330,7 +318,7 @@ Shape examples, trimmed from old `PROTOCOL.md` (captured output, not a spec):
 
 | Task | Start here | Also touch | ADR |
 |---|---|---|---|
-| Add or rename a model | Supported-model list (request adapter) | The plugin's advertised list, only if the plugin should offer it. The models endpoint and the e2e test follow the list. Check the ID against the CLI. | [pass-full-model-ids-to-cli](adrs/pass-full-model-ids-to-cli.md) |
+| Add or rename a model | Supported-model list (request adapter) | The models endpoint and the e2e test follow the list. Check the ID against the CLI. | [pass-full-model-ids-to-cli](adrs/pass-full-model-ids-to-cli.md) |
 | Change prompt formatting | Prompt flattening (request adapter) | Content-block text extraction; OpenAI content types; the delta prompt filter | [flatten-messages-into-one-prompt](adrs/flatten-messages-into-one-prompt.md) |
 | Change the system prompt or what goes in it | The system prompt builder (tool protocol) | Argument building (subprocess manager), which passes it; the system and developer message handling (request adapter) | [run-cli-as-plain-llm-with-prompt-tool-calls](adrs/run-cli-as-plain-llm-with-prompt-tool-calls.md) |
 | Change tool calling: client tools, `tool_choice`, tool-call replies or tool results | Tool protocol (catalog, calling protocol, call parser) | Tool rendering in prompt flattening (request adapter); tool-call chunk and `tool_calls` body (response adapter); the active-tools handling in both response paths (request handlers) | [run-cli-as-plain-llm-with-prompt-tool-calls](adrs/run-cli-as-plain-llm-with-prompt-tool-calls.md) |
@@ -346,7 +334,7 @@ Shape examples, trimmed from old `PROTOCOL.md` (captured output, not a spec):
 | CLI `is_error` results | Response adapter (error message) and request handlers (both response paths) | Session save, which still happens on such a result | None |
 | Request validation or body parse errors | Validation in the chat completions handler | Body parser and error handler (HTTP app) | None |
 | Startup checks | Standalone entry | CLI and auth checks (subprocess manager) | None |
-| Clawdbot plugin | Plugin entry | Legacy session manager | [local-openai-proxy-over-clawdbot-backend](adrs/local-openai-proxy-over-clawdbot-backend.md) |
+| Entry points or how the server is started | Standalone entry (what runs) and library entry (re-exports) | HTTP app | [run-as-standalone-openai-compatible-server](adrs/run-as-standalone-openai-compatible-server.md) |
 | Spawn options, cwd or env | Spawn (subprocess manager) | The `CLAUDECODE` filter | [spawn-one-cli-process-per-request](adrs/spawn-one-cli-process-per-request.md) |
 | Logging | The summary line: request log (formatting) and request handlers (when a request finishes); the tool-call warning (tool protocol) | Usage mapping (response adapter); `DEBUG` (HTTP app) and `DEBUG_SUBPROCESS` (subprocess manager), which add detail only when set. Logs use `console` throughout. | None |
 
@@ -371,4 +359,4 @@ Items marked **inferred** come from reading the code. They have not been run.
 - **The auth check always passes.** A logged-out CLI shows up on the first request, not at startup.
 - **Malformed JSON and oversized bodies return 500.** They go to the generic error handler, so the client gets `500 server_error`, not 400 or 413.
 - **Dead code.** The response adapter has an unused per-message chunk converter. The CLI types have an unused init-message guard. The subprocess manager has an unused is-running check and an unused typed events interface. Its tool events (`tool_use_start`, `input_json_delta`, `content_block_stop`) have no listeners and do not fire while the CLI has no tools.
-- **Stale naming.** The session store's header comment calls the key a "Hermes conversation key". It is just the request's `user` field. The legacy session manager's header describes Clawdbot IDs, which the server does not use.
+- **Stale naming.** The session store's header comment calls the key a "Hermes conversation key". It is just the request's `user` field.

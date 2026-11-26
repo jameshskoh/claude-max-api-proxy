@@ -30,11 +30,10 @@
   - An edited or shortened history gives an empty delta. The code then sends the full history into the resumed session.
   - Changes to messages before the saved count are never sent. The system prompt is the exception: it is sent on every turn, so a changed one takes effect.
   - Two clients sending the same `user` value share a session.
-  - The legacy session manager is a file store that the server does not use. It is easy to confuse with the session store.
 
 ## Affected components
 
-Session resolution and the result, error and close listeners in both response paths of the request handlers; the session store; the request adapter's delta prompt; and the subprocess manager, which picks the session flag. The legacy session manager is only re-exported by the plugin entry.
+Session resolution and the result, error and close listeners in both response paths of the request handlers; the session store; the request adapter's delta prompt; and the subprocess manager, which picks the session flag.
 
 ## Revisit when
 

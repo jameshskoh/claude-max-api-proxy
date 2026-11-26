@@ -8,7 +8,7 @@
 
 - The proxy is a local helper for OpenAI-compatible clients on the same machine.
 - The original design assumed that binding to loopback was enough (old `DESIGN.md`). It is not: a web page open in the user's browser can try to reach a loopback server, and DNS rebinding can make a remote name resolve to it.
-- The OpenClaw provider setup starts the server and gives clients a dummy key, `local`. The server never checks it.
+- Clients may send any API key (for example `local`). The server never checks it.
 
 ## Decision
 
@@ -30,7 +30,7 @@
 
 ## Affected components
 
-The HTTP app (bind address, the Host check, routing with no auth layer, and the error handler that returns the raw message) and the plugin entry's provider setup, which starts the server and hands out the dummy key.
+The HTTP app (bind address, the Host check, routing with no auth layer, and the error handler that returns the raw message).
 
 ## Revisit when
 

@@ -14,7 +14,7 @@ Start with [ARCHITECTURE.md](../ARCHITECTURE.md) for the map and [WORKFLOW.md](.
 
 | Decision | One line | Touch it when you… |
 |---|---|---|
-| [local-openai-proxy-over-clawdbot-backend](local-openai-proxy-over-clawdbot-backend.md) | Run a local OpenAI-compatible HTTP server instead of a custom Clawdbot backend. | change the entry points, the plugin wrapper, or how clients connect |
+| [run-as-standalone-openai-compatible-server](run-as-standalone-openai-compatible-server.md) | Run a standalone local OpenAI-compatible server that wraps the CLI. | change the entry points, the HTTP routes, or how clients connect |
 | [spawn-one-cli-process-per-request](spawn-one-cli-process-per-request.md) | A new `claude` process per request, no pool, prompt on stdin. | touch concurrency, cold start, spawn options, env or cwd |
 | [flatten-messages-into-one-prompt](flatten-messages-into-one-prompt.md) | Join OpenAI `messages` into one tagged text prompt. | change prompt format or add image support |
 | [pass-full-model-ids-to-cli](pass-full-model-ids-to-cli.md) | Pass the requested model ID to `--model` unchanged; unlisted IDs → 404. | add or retire models, change model validation or the reported name |

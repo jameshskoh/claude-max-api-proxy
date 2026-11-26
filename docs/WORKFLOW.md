@@ -26,10 +26,6 @@ flowchart TD
 - Stopping the server closes the listener and waits for open connections. An in-flight streaming response delays exit (inferred, not tested).
 - Shutdown does not signal CLI children itself. Run by hand, a running `claude` can outlive the server. Under launchd, stopping the job also kills the rest of its process group unless the plist sets `AbandonProcessGroup`, so children are normally cleaned up (inferred, not tested).
 
-**Plugin path (not how the proxy is normally run)**
-
-The plugin entry registers a provider. The provider's auth flow repeats the CLI and auth checks, asks for a port, starts the server, and returns a config that points the host at `http://127.0.0.1:<port>/v1`. The plugin's unload hook stops the server. Nothing in the LaunchAgent setup uses this path.
-
 ## 2. Request pipeline
 
 Each HTTP request passes these steps in order.
@@ -228,8 +224,6 @@ stateDiagram-v2
 - **Restart**: the map starts empty. CLI transcripts stay under `~/.claude/projects/`. Nothing in the proxy deletes them.
 - **Client disconnect while resuming** clears the session, because the streaming close handler runs before the turn is marked complete (inferred from code).
 - **Overlapping requests** with the same `user` are not serialized. Both can `--resume` the same session (inferred, not tested).
-- The legacy session manager is a separate library-level session map. The request handlers do not use it.
-
 ## 6. Timeouts, disconnects, kill
 
 - **Timeout.** After 15 minutes, the subprocess manager sends SIGTERM through the kill path (the whole tree only on Windows) if the process is not already killed. It then emits `error` with `Request timed out after 900000ms`. The error listener sends the error reply and clears the session if resuming. If nothing listens for `error`, the timer still stops the process but emits nothing, so it cannot crash the process. The request handlers always listen.
@@ -303,9 +297,9 @@ Both debug flags log prompt fragments, so keep them off in normal use.
 
 This section replaces the old `docs/macos-setup.md` (removed after commit `2074263`), which used the label `com.claude-code-provider` and logged to `/tmp`. This section is optional and is an example setup. The plist is not in this repo, so write it yourself and change the label, paths and user to match your machine. The normal way to run the proxy is `npm start`.
 
-- **Label:** `com.openclaw.claude-max-proxy`
-- **Plist:** `~/Library/LaunchAgents/com.openclaw.claude-max-proxy.plist`
-- **Logs:** `~/.openclaw/logs/claude-max-proxy.log` (stdout) and `~/.openclaw/logs/claude-max-proxy.err.log` (stderr)
+- **Label:** `local.claude-max-proxy`
+- **Plist:** `~/Library/LaunchAgents/local.claude-max-proxy.plist`
+- **Logs:** `~/Library/Logs/claude-max-proxy/claude-max-proxy.log` (stdout) and `~/Library/Logs/claude-max-proxy/claude-max-proxy.err.log` (stderr)
 
 **Before loading**
 
@@ -313,7 +307,7 @@ This section replaces the old `docs/macos-setup.md` (removed after commit `20742
 2. Create the log folder. launchd does not create it, and the job will not start without it:
 
    ```bash
-   mkdir -p ~/.openclaw/logs
+   mkdir -p ~/Library/Logs/claude-max-proxy
    ```
 
 3. Find the paths to fill into the plist:
@@ -332,7 +326,7 @@ This section replaces the old `docs/macos-setup.md` (removed after commit `20742
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.openclaw.claude-max-proxy</string>
+  <string>local.claude-max-proxy</string>
 
   <!-- Absolute path to node (output of which node), then the built server, then the port -->
   <key>ProgramArguments</key>
@@ -362,9 +356,9 @@ This section replaces the old `docs/macos-setup.md` (removed after commit `20742
   <true/>
 
   <key>StandardOutPath</key>
-  <string>/Users/YOU/.openclaw/logs/claude-max-proxy.log</string>
+  <string>/Users/YOU/Library/Logs/claude-max-proxy/claude-max-proxy.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/YOU/.openclaw/logs/claude-max-proxy.err.log</string>
+  <string>/Users/YOU/Library/Logs/claude-max-proxy/claude-max-proxy.err.log</string>
 </dict>
 </plist>
 ```
@@ -372,13 +366,13 @@ This section replaces the old `docs/macos-setup.md` (removed after commit `20742
 **Commands**
 
 ```bash
-plutil -lint ~/Library/LaunchAgents/com.openclaw.claude-max-proxy.plist          # check the plist syntax
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.openclaw.claude-max-proxy.plist   # start
-launchctl list com.openclaw.claude-max-proxy                                     # status and last exit code
-curl -s http://127.0.0.1:3456/health                                             # check it answers
-launchctl kickstart -k gui/$(id -u)/com.openclaw.claude-max-proxy                # restart with the same plist
-launchctl bootout gui/$(id -u)/com.openclaw.claude-max-proxy                     # stop
-tail -f ~/.openclaw/logs/claude-max-proxy.err.log                                # follow errors
+plutil -lint ~/Library/LaunchAgents/local.claude-max-proxy.plist                      # check the plist syntax
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.claude-max-proxy.plist  # start
+launchctl list local.claude-max-proxy                                                 # status and last exit code
+curl -s http://127.0.0.1:3456/health                                                  # check it answers
+launchctl kickstart -k gui/$(id -u)/local.claude-max-proxy                            # restart with the same plist
+launchctl bootout gui/$(id -u)/local.claude-max-proxy                                 # stop
+tail -f ~/Library/Logs/claude-max-proxy/claude-max-proxy.err.log                      # follow errors
 ```
 
 After any plist change, run `bootout`, then `bootstrap`. `kickstart` does not reread the plist.
@@ -386,8 +380,8 @@ After any plist change, run `bootout`, then `bootstrap`. `kickstart` does not re
 **Uninstall**
 
 ```bash
-launchctl bootout gui/$(id -u)/com.openclaw.claude-max-proxy
-rm ~/Library/LaunchAgents/com.openclaw.claude-max-proxy.plist
+launchctl bootout gui/$(id -u)/local.claude-max-proxy
+rm ~/Library/LaunchAgents/local.claude-max-proxy.plist
 ```
 
 **Troubleshooting**
