@@ -122,6 +122,20 @@ export function createDoneChunk(
 }
 
 /**
+ * Message for a result that reports a failure, or null when the result is a
+ * normal reply. Looks at is_error only, not the subtype. Error results may have
+ * no reply text, so the message falls back to the CLI's error list, then to the subtype.
+ */
+export function cliResultErrorMessage(result: ClaudeCliResult): string | null {
+  if (!result.is_error) return null;
+  if (result.result) return result.result;
+  const errors = "errors" in result ? result.errors : undefined;
+  const joined = Array.isArray(errors) ? errors.join("; ") : "";
+  if (joined) return joined;
+  return `Claude CLI error: ${result.subtype}`;
+}
+
+/**
  * Convert Claude CLI result to OpenAI non-streaming response.
  *
  * `content` overrides the text taken from the result (null when a reply is
@@ -136,7 +150,7 @@ export function cliResultToOpenai(
 ): OpenAIChatResponse {
   const message: OpenAIChatResponse["choices"][0]["message"] = {
     role: "assistant",
-    content: content !== undefined ? content : result.result,
+    content: content !== undefined ? content : (result.result ?? ""),
   };
 
   const hasToolCalls = toolCalls !== undefined && toolCalls.length > 0;

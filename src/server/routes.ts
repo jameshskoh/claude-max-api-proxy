@@ -9,6 +9,7 @@ import { v4 as uuidv4 } from "uuid";
 import { ClaudeSubprocess } from "../subprocess/manager.js";
 import { openaiToCli, openaiToCliDelta, extractModel, SUPPORTED_MODELS } from "../adapter/openai-to-cli.js";
 import {
+  cliResultErrorMessage,
   cliResultToOpenai,
   cliUsageToOpenai,
   createDeltaChunk,
@@ -279,6 +280,22 @@ async function handleStreamingResponse(
       if (sessionCtx.sessionKey && cliInput.sessionId) {
         setSession(sessionCtx.sessionKey, cliInput.sessionId, sessionCtx.messageCount);
       }
+      // An error result (is_error) goes out as an error event, not as a normal reply
+      const errorMessage = cliResultErrorMessage(result);
+      if (errorMessage !== null) {
+        if (!res.writableEnded) {
+          res.write(
+            `data: ${JSON.stringify({
+              error: { message: errorMessage, type: "server_error", code: null },
+            })}\n\n`
+          );
+          res.write("data: [DONE]\n\n");
+          res.end();
+        }
+        summarize({ finish: "error", error: errorMessage });
+        resolve();
+        return;
+      }
       if (!res.writableEnded) {
         // Tool replies were buffered rather than streamed, so decide how to send them now
         const replyText = bufferedText || result.result || "";
@@ -418,6 +435,16 @@ async function handleNonStreamingResponse(
     let replied = false;
     // Set when the client left before the reply; the socket is gone, so nothing is sent
     let clientGone = false;
+    // Set once the request has been summarized, so each request is summarized at most once
+    let summarized = false;
+    // Only one response may be written, and never to a client that has left or already got headers
+    const canReply = () => !replied && !clientGone && !res.headersSent;
+    const summarizeOnce = (outcome: Parameters<RequestSummary>[0]) => {
+      if (!summarized) {
+        summarized = true;
+        summarize(outcome);
+      }
+    };
     subprocess.on("result", (result: ClaudeCliResult) => {
       finalResult = result;
     });
@@ -427,18 +454,18 @@ async function handleNonStreamingResponse(
     res.on("close", () => {
       if (!replied) {
         clientGone = true;
-        summarize({ finish: "aborted" });
+        summarizeOnce({ finish: "aborted" });
         subprocess.kill();
       }
     });
 
     subprocess.on("error", (error: Error) => {
       console.error("[NonStreaming] Error:", error.message);
-      summarize({ finish: "error", error: error.message });
+      summarizeOnce({ finish: "error", error: error.message });
       if (sessionCtx.resume && sessionCtx.sessionKey) {
         clearSession(sessionCtx.sessionKey);
       }
-      if (!clientGone) {
+      if (canReply()) {
         replied = true;
         res.status(500).json({
           error: {
@@ -454,29 +481,42 @@ async function handleNonStreamingResponse(
     subprocess.on("close", (code: number | null) => {
       // A result that arrives after the client left is dropped: not saved, not sent
       if (finalResult && !clientGone) {
-        if (sessionCtx.sessionKey && cliInput.sessionId) {
-          setSession(sessionCtx.sessionKey, cliInput.sessionId, sessionCtx.messageCount);
+        // An error reply may already have gone out; if so, this result is not sent
+        if (canReply()) {
+          if (sessionCtx.sessionKey && cliInput.sessionId) {
+            setSession(sessionCtx.sessionKey, cliInput.sessionId, sessionCtx.messageCount);
+          }
+          // An error result (is_error) goes out as an error response, not as a normal reply
+          const errorMessage = cliResultErrorMessage(finalResult);
+          if (errorMessage !== null) {
+            replied = true;
+            res.status(500).json({
+              error: { message: errorMessage, type: "server_error", code: null },
+            });
+            summarizeOnce({ finish: "error", error: errorMessage });
+          } else {
+            const toolReply = toolNames
+              ? parseToolCalls(finalResult.result ?? "", toolNames, requestId)
+              : null;
+            replied = true;
+            res.json(
+              toolReply
+                ? cliResultToOpenai(
+                    finalResult,
+                    requestId,
+                    cliInput.model,
+                    toolReply.toolCalls,
+                    toolReply.content
+                  )
+                : cliResultToOpenai(finalResult, requestId, cliInput.model)
+            );
+            summarizeOnce({
+              finish: toolReply ? "tool_calls" : "stop",
+              toolCalls: toolReply?.toolCalls.length ?? 0,
+              usage: finalResult.usage ? cliUsageToOpenai(finalResult.usage) : undefined,
+            });
+          }
         }
-        const toolReply = toolNames
-          ? parseToolCalls(finalResult.result, toolNames, requestId)
-          : null;
-        replied = true;
-        res.json(
-          toolReply
-            ? cliResultToOpenai(
-                finalResult,
-                requestId,
-                cliInput.model,
-                toolReply.toolCalls,
-                toolReply.content
-              )
-            : cliResultToOpenai(finalResult, requestId, cliInput.model)
-        );
-        summarize({
-          finish: toolReply ? "tool_calls" : "stop",
-          toolCalls: toolReply?.toolCalls.length ?? 0,
-          usage: finalResult.usage ? cliUsageToOpenai(finalResult.usage) : undefined,
-        });
       } else if (finalResult) {
         // The client left but the CLI finished anyway. A resumed session now
         // holds a reply the client never got, so drop it instead of resuming it.
@@ -485,11 +525,11 @@ async function handleNonStreamingResponse(
         }
       } else {
         const message = `Claude CLI exited with code ${code} without response`;
-        summarize({ finish: "error", error: message });
+        summarizeOnce({ finish: "error", error: message });
         if (sessionCtx.resume && sessionCtx.sessionKey) {
           clearSession(sessionCtx.sessionKey);
         }
-        if (!clientGone && !res.headersSent) {
+        if (canReply()) {
           replied = true;
           res.status(500).json({
             error: {
@@ -512,8 +552,8 @@ async function handleNonStreamingResponse(
         systemPrompt: cliInput.systemPrompt,
       })
       .catch((error) => {
-        summarize({ finish: "error", error: error.message });
-        if (!clientGone) {
+        summarizeOnce({ finish: "error", error: error.message });
+        if (canReply()) {
           replied = true;
           res.status(500).json({
             error: {
