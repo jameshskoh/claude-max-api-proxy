@@ -16,13 +16,55 @@ import {
 } from "../adapter/cli-to-openai.js";
 import { parseToolCalls, toolNamesOf, toolsActive } from "../adapter/tools.js";
 import { getSession, setSession, clearSession } from "../subprocess/session-store.js";
-import type { OpenAIChatChunkDelta, OpenAIChatRequest } from "../types/openai.js";
+import { formatRequestLog, type RequestFinish } from "./request-log.js";
+import type { OpenAIChatChunkDelta, OpenAIChatRequest, OpenAIUsage } from "../types/openai.js";
 import type { ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
 
 interface SessionContext {
   sessionKey: string | undefined;
   resume: boolean;
   messageCount: number;
+}
+
+/** What a request ended with, as far as its summary line is concerned. */
+interface RequestOutcome {
+  finish: RequestFinish;
+  toolCalls?: number;
+  usage?: OpenAIUsage;
+  error?: string;
+}
+
+/** Records the summary line for one request; later calls are ignored. */
+type RequestSummary = (outcome: RequestOutcome) => void;
+
+/**
+ * Build the once-only summary logger for one request. The first call prints
+ * the summary line; any later call (an error followed by a close, say) does nothing.
+ */
+function createRequestSummary(
+  requestId: string,
+  body: OpenAIChatRequest,
+  startedAt: number
+): RequestSummary {
+  let logged = false;
+  return (outcome) => {
+    if (logged) return;
+    logged = true;
+    console.log(
+      formatRequestLog({
+        requestId,
+        model: typeof body.model === "string" ? body.model : "-",
+        stream: body.stream === true,
+        messages: Array.isArray(body.messages) ? body.messages.length : 0,
+        tools: Array.isArray(body.tools) ? body.tools.length : 0,
+        finish: outcome.finish,
+        toolCalls: outcome.toolCalls ?? 0,
+        usage: outcome.usage,
+        error: outcome.error,
+        durationMs: Date.now() - startedAt,
+      })
+    );
+  };
 }
 
 /**
@@ -65,15 +107,19 @@ export async function handleChatCompletions(
   res: Response
 ): Promise<void> {
   const requestId = uuidv4().replace(/-/g, "").slice(0, 24);
+  const startedAt = Date.now();
   const body = req.body as OpenAIChatRequest;
   const stream = body.stream === true;
+  const summarize = createRequestSummary(requestId, body, startedAt);
 
   try {
     // Validate request
     if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
+      const message = "messages is required and must be a non-empty array";
+      summarize({ finish: "error", error: message });
       res.status(400).json({
         error: {
-          message: "messages is required and must be a non-empty array",
+          message,
           type: "invalid_request_error",
           code: "invalid_messages",
         },
@@ -82,9 +128,11 @@ export async function handleChatCompletions(
     }
 
     if (!extractModel(body.model)) {
+      const message = `The model ${JSON.stringify(body.model ?? null)} is not supported. Supported models: ${SUPPORTED_MODELS.join(", ")}`;
+      summarize({ finish: "error", error: message });
       res.status(404).json({
         error: {
-          message: `The model ${JSON.stringify(body.model ?? null)} is not supported. Supported models: ${SUPPORTED_MODELS.join(", ")}`,
+          message,
           type: "invalid_request_error",
           param: "model",
           code: "model_not_found",
@@ -101,13 +149,14 @@ export async function handleChatCompletions(
     const toolNames = toolsActive(body) ? toolNamesOf(body) : null;
 
     if (stream) {
-      await handleStreamingResponse(req, res, subprocess, cliInput, requestId, sessionCtx, toolNames);
+      await handleStreamingResponse(req, res, subprocess, cliInput, requestId, sessionCtx, toolNames, summarize);
     } else {
-      await handleNonStreamingResponse(res, subprocess, cliInput, requestId, sessionCtx, toolNames);
+      await handleNonStreamingResponse(res, subprocess, cliInput, requestId, sessionCtx, toolNames, summarize);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     console.error("[handleChatCompletions] Error:", message);
+    summarize({ finish: "error", error: message });
 
     if (!res.headersSent) {
       res.status(500).json({
@@ -138,7 +187,8 @@ async function handleStreamingResponse(
   cliInput: ReturnType<typeof openaiToCli>,
   requestId: string,
   sessionCtx: SessionContext,
-  toolNames: Set<string> | null
+  toolNames: Set<string> | null,
+  summarize: RequestSummary
 ): Promise<void> {
   // Set SSE headers
   res.setHeader("Content-Type", "text/event-stream");
@@ -165,6 +215,7 @@ async function handleStreamingResponse(
     res.on("close", () => {
       if (!isComplete) {
         // Client disconnected before response completed - kill subprocess
+        summarize({ finish: "aborted" });
         subprocess.kill();
       }
       resolve();
@@ -231,7 +282,7 @@ async function handleStreamingResponse(
       if (!res.writableEnded) {
         // Tool replies were buffered rather than streamed, so decide how to send them now
         const replyText = bufferedText || result.result || "";
-        const toolReply = toolNames ? parseToolCalls(replyText, toolNames) : null;
+        const toolReply = toolNames ? parseToolCalls(replyText, toolNames, requestId) : null;
         if (toolReply) {
           let roleSent = false;
           if (toolReply.content !== null) {
@@ -270,12 +321,18 @@ async function handleStreamingResponse(
         res.write(`data: ${JSON.stringify(doneChunk)}\n\n`);
         res.write("data: [DONE]\n\n");
         res.end();
+        summarize({
+          finish: toolReply ? "tool_calls" : "stop",
+          toolCalls: toolReply?.toolCalls.length ?? 0,
+          usage: result.usage ? cliUsageToOpenai(result.usage) : undefined,
+        });
       }
       resolve();
     });
 
     subprocess.on("error", (error: Error) => {
       console.error("[Streaming] Error:", error.message);
+      summarize({ finish: "error", error: error.message });
       // Resume may have failed (e.g. stale/missing session) — drop it so the
       // next turn self-heals with a fresh full-history session
       if (sessionCtx.resume && sessionCtx.sessionKey) {
@@ -293,6 +350,12 @@ async function handleStreamingResponse(
     });
 
     subprocess.on("close", (code: number | null) => {
+      if (!isComplete) {
+        summarize({
+          finish: "error",
+          error: `Process exited with code ${code} without result`,
+        });
+      }
       // Subprocess exited - ensure response is closed
       if (code !== 0 && !isComplete) {
         if (sessionCtx.resume && sessionCtx.sessionKey) {
@@ -334,7 +397,8 @@ async function handleNonStreamingResponse(
   cliInput: ReturnType<typeof openaiToCli>,
   requestId: string,
   sessionCtx: SessionContext,
-  toolNames: Set<string> | null
+  toolNames: Set<string> | null,
+  summarize: RequestSummary
 ): Promise<void> {
   return new Promise((resolve) => {
     let finalResult: ClaudeCliResult | null = null;
@@ -342,8 +406,15 @@ async function handleNonStreamingResponse(
       finalResult = result;
     });
 
+    // Non-streaming has no disconnect handling of its own; a client that goes
+    // away before the reply is logged as aborted. Ignored if already logged.
+    res.on("close", () => {
+      summarize({ finish: "aborted" });
+    });
+
     subprocess.on("error", (error: Error) => {
       console.error("[NonStreaming] Error:", error.message);
+      summarize({ finish: "error", error: error.message });
       if (sessionCtx.resume && sessionCtx.sessionKey) {
         clearSession(sessionCtx.sessionKey);
       }
@@ -363,7 +434,7 @@ async function handleNonStreamingResponse(
           setSession(sessionCtx.sessionKey, cliInput.sessionId, sessionCtx.messageCount);
         }
         const toolReply = toolNames
-          ? parseToolCalls(finalResult.result, toolNames)
+          ? parseToolCalls(finalResult.result, toolNames, requestId)
           : null;
         res.json(
           toolReply
@@ -376,7 +447,14 @@ async function handleNonStreamingResponse(
               )
             : cliResultToOpenai(finalResult, requestId, cliInput.model)
         );
+        summarize({
+          finish: toolReply ? "tool_calls" : "stop",
+          toolCalls: toolReply?.toolCalls.length ?? 0,
+          usage: finalResult.usage ? cliUsageToOpenai(finalResult.usage) : undefined,
+        });
       } else {
+        const message = `Claude CLI exited with code ${code} without response`;
+        summarize({ finish: "error", error: message });
         if (sessionCtx.resume && sessionCtx.sessionKey) {
           clearSession(sessionCtx.sessionKey);
         }
@@ -402,6 +480,7 @@ async function handleNonStreamingResponse(
         systemPrompt: cliInput.systemPrompt,
       })
       .catch((error) => {
+        summarize({ finish: "error", error: error.message });
         res.status(500).json({
           error: {
             message: error.message,

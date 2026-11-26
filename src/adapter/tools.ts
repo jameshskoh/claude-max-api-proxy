@@ -152,6 +152,8 @@ export function toolNamesOf(request: OpenAIChatRequest): Set<string> {
 
 const OPEN_TAG = "<tool_call>";
 const CLOSE_TAG = "</tool_call>";
+/** Longest reply excerpt printed when a tool call block cannot be parsed. */
+const SNIPPET_MAX_CHARS = 200;
 
 /** A tool call block found in the text: its JSON object text and its full span. */
 interface ToolCallSpan {
@@ -206,6 +208,8 @@ function findObjectEnd(text: string, start: number): number {
 function scanToolCallBlocks(text: string): {
   spans: ToolCallSpan[];
   error: string | null;
+  /** Where the block that failed to scan starts; meaningful only when error is set. */
+  errorAt: number;
 } {
   const spans: ToolCallSpan[] = [];
   let open = text.indexOf(OPEN_TAG);
@@ -217,17 +221,17 @@ function scanToolCallBlocks(text: string): {
     }
     const jsonEnd = findObjectEnd(text, jsonStart);
     if (jsonEnd === -1) {
-      return { spans, error: "tool call JSON is not closed" };
+      return { spans, error: "tool call JSON is not closed", errorAt: open };
     }
     const closeStart = skipWhitespace(text, jsonEnd);
     if (!text.startsWith(CLOSE_TAG, closeStart)) {
-      return { spans, error: "tool call block is not closed" };
+      return { spans, error: "tool call block is not closed", errorAt: open };
     }
     const end = closeStart + CLOSE_TAG.length;
     spans.push({ json: text.slice(jsonStart, jsonEnd), start: open, end });
     open = text.indexOf(OPEN_TAG, end);
   }
-  return { spans, error: null };
+  return { spans, error: null, errorAt: -1 };
 }
 
 /**
@@ -237,10 +241,15 @@ function scanToolCallBlocks(text: string): {
  * (bad JSON, a name not in toolNames, or a non-object payload). In that case
  * the caller should treat the whole reply as plain text. Otherwise returns the
  * reply text with the blocks removed (null if nothing is left) and the calls.
+ *
+ * When a block is rejected, a warning is logged. If requestId is given it is
+ * included so the warning can be tied to its request, along with a short
+ * snippet of the reply starting at the failing block.
  */
 export function parseToolCalls(
   text: string,
-  toolNames: Set<string>
+  toolNames: Set<string>,
+  requestId?: string
 ): { content: string | null; toolCalls: OpenAIToolCall[] } | null {
   const scan = scanToolCallBlocks(text);
   if (scan.spans.length === 0 && scan.error === null) {
@@ -248,8 +257,12 @@ export function parseToolCalls(
   }
 
   const toolCalls: OpenAIToolCall[] = [];
-  const reject = (reason: string): null => {
-    console.warn("[tools] Unparseable tool call, returning text:", reason);
+  const reject = (reason: string, blockStart: number): null => {
+    const prefix = requestId !== undefined ? `[req ${requestId}] ` : "";
+    const snippet = JSON.stringify(text.slice(blockStart, blockStart + SNIPPET_MAX_CHARS));
+    console.warn(
+      `${prefix}[tools] Unparseable tool call, returning text: ${reason}; snippet=${snippet}`
+    );
     return null;
   };
   for (const span of scan.spans) {
@@ -257,10 +270,10 @@ export function parseToolCalls(
     try {
       payload = JSON.parse(span.json);
     } catch {
-      return reject("tool call is not valid JSON");
+      return reject("tool call is not valid JSON", span.start);
     }
     if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
-      return reject("tool call is not a JSON object");
+      return reject("tool call is not a JSON object", span.start);
     }
 
     const { name, arguments: args } = payload as {
@@ -268,7 +281,7 @@ export function parseToolCalls(
       arguments?: unknown;
     };
     if (typeof name !== "string" || !toolNames.has(name)) {
-      return reject(`unknown tool name ${JSON.stringify(name)}`);
+      return reject(`unknown tool name ${JSON.stringify(name)}`, span.start);
     }
 
     let argumentsJson: string;
@@ -279,13 +292,13 @@ export function parseToolCalls(
       try {
         JSON.parse(args);
       } catch {
-        return reject("tool call arguments string is not valid JSON");
+        return reject("tool call arguments string is not valid JSON", span.start);
       }
       argumentsJson = args;
     } else if (typeof args === "object" && !Array.isArray(args)) {
       argumentsJson = JSON.stringify(args);
     } else {
-      return reject("tool call arguments are not an object or string");
+      return reject("tool call arguments are not an object or string", span.start);
     }
 
     toolCalls.push({
@@ -296,7 +309,7 @@ export function parseToolCalls(
   }
 
   if (scan.error !== null) {
-    return reject(scan.error);
+    return reject(scan.error, scan.errorAt);
   }
 
   let kept = "";

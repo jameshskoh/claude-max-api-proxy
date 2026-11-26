@@ -316,3 +316,53 @@ describe("toolNamesOf", () => {
     assert.equal(toolNamesOf(request()).size, 0);
   });
 });
+
+/** Run fn with console.warn captured, returning what it was called with. */
+function captureWarnings(fn: () => void): string[] {
+  const original = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  };
+  try {
+    fn();
+  } finally {
+    console.warn = original;
+  }
+  return warnings;
+}
+
+describe("parseToolCalls unparseable warning", () => {
+  const BAD_REPLY =
+    'Let me check.\n<tool_call>\n{"name": "get_weather", "arguments": }\n</tool_call>';
+
+  it("includes the request id and a snippet starting at the failing block", () => {
+    let result: unknown;
+    const warnings = captureWarnings(() => {
+      result = parseToolCalls(BAD_REPLY, TOOL_NAMES, "req123");
+    });
+
+    assert.equal(result, null);
+    assert.equal(warnings.length, 1);
+    const [warning] = warnings;
+    assert.ok(
+      warning.startsWith(
+        "[req req123] [tools] Unparseable tool call, returning text: tool call is not valid JSON; snippet="
+      ),
+      warning
+    );
+    // Snippet is JSON-encoded from the opening tag, so newlines stay escaped
+    assert.ok(warning.endsWith('snippet="<tool_call>\\n{\\"name\\": \\"get_weather\\", \\"arguments\\": }\\n</tool_call>"'), warning);
+    assert.ok(!warning.includes("Let me check"));
+    assert.ok(!warning.includes("\n"));
+  });
+
+  it("has no request prefix when no request id is given", () => {
+    const warnings = captureWarnings(() => {
+      parseToolCalls(BAD_REPLY, TOOL_NAMES);
+    });
+
+    assert.equal(warnings.length, 1);
+    assert.ok(warnings[0].startsWith("[tools] Unparseable tool call, returning text: "), warnings[0]);
+  });
+});
