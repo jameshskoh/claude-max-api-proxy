@@ -317,6 +317,121 @@ describe("Windows process-tree termination", { skip: WINDOWS_ONLY }, () => {
   }
 });
 
+describe("stdout tail and timeout handling without an error listener", () => {
+  // Plain fixtures that run on every platform, so these checks do not depend
+  // on the Windows-only process-tree suite.
+  const STALL_TIMEOUT_MS = 50;
+  let fixtureDir: string;
+  let unterminatedResultPath: string;
+  let stallPath: string;
+  let previousClaudeBin: string | undefined;
+
+  before(async () => {
+    previousClaudeBin = process.env.CLAUDE_BIN;
+    fixtureDir = await mkdtemp(path.join(tmpdir(), "claude-tail-"));
+    unterminatedResultPath = path.join(fixtureDir, "unterminated-result.cjs");
+    stallPath = path.join(fixtureDir, "stall.cjs");
+    await writeFile(
+      unterminatedResultPath,
+      [
+        "process.stdin.resume();",
+        'process.stdin.on("end", () => {',
+        'process.stdout.write(JSON.stringify({type:"result",subtype:"success",is_error:false,result:"hi",session_id:"s",duration_ms:1,duration_api_ms:1,num_turns:1,total_cost_usd:0,usage:{input_tokens:1,output_tokens:1}}));',
+        "process.exitCode = 0;",
+        "});",
+      ].join("\n"),
+      "utf8"
+    );
+    await writeFile(
+      stallPath,
+      [
+        "process.stdin.resume();",
+        'process.stdin.on("end", () => {',
+        "  setTimeout(() => {}, 10_000);",
+        "});",
+      ].join("\n"),
+      "utf8"
+    );
+
+    process.env.CLAUDE_BIN = process.execPath;
+  });
+
+  after(async () => {
+    restoreEnvironmentVariable("CLAUDE_BIN", previousClaudeBin);
+    await rm(fixtureDir, { recursive: true, force: true });
+  });
+
+  it("emits a final result line that has no trailing newline before close", async () => {
+    const subprocess = new ClaudeSubprocess();
+    const testable = subprocess as unknown as {
+      buildArgs: (options: SubprocessOptions) => string[];
+    };
+    const buildRealArgs = testable.buildArgs.bind(subprocess);
+    testable.buildArgs = (options) => [unterminatedResultPath, ...buildRealArgs(options)];
+
+    const events: string[] = [];
+    let resultText: unknown;
+    subprocess.on("result", (result: { result?: unknown }) => {
+      events.push("result");
+      resultText = result.result;
+    });
+    subprocess.on("error", () => {
+      events.push("error");
+    });
+    const closed = new Promise<void>((resolve) =>
+      subprocess.once("close", () => {
+        events.push("close");
+        resolve();
+      })
+    );
+
+    await subprocess.start("hello", {
+      model: "claude-haiku-4-5",
+      timeout: GENEROUS_REQUEST_TIMEOUT_MS,
+    });
+    await withTimeout(closed, "unterminated result fixture did not close");
+
+    assert.deepEqual(events, ["result", "close"]);
+    assert.equal(resultText, "hi");
+  });
+
+  it("does not throw when the timeout fires with no error listener", async () => {
+    const subprocess = new ClaudeSubprocess();
+    const testable = subprocess as unknown as {
+      buildArgs: (options: SubprocessOptions) => string[];
+      armTimeout: (timeout: number) => void;
+    };
+    const buildRealArgs = testable.buildArgs.bind(subprocess);
+    testable.buildArgs = (options) => [stallPath, ...buildRealArgs(options)];
+    assert.equal(subprocess.listenerCount("error"), 0);
+
+    // Spy so an uncaught throw from the timer is recorded instead of crashing the runner.
+    const uncaught: unknown[] = [];
+    const onUncaught = (err: unknown) => {
+      uncaught.push(err);
+    };
+    process.on("uncaughtException", onUncaught);
+    const closed = new Promise<number | null>((resolve) =>
+      subprocess.once("close", resolve)
+    );
+    try {
+      await subprocess.start("hello", {
+        model: "claude-haiku-4-5",
+        timeout: GENEROUS_REQUEST_TIMEOUT_MS,
+      });
+      testable.armTimeout(STALL_TIMEOUT_MS);
+      await withTimeout(closed, "stalled fixture did not close after the timeout");
+
+      assert.deepEqual(uncaught, [], "timeout must not throw without an error listener");
+      assert.equal(subprocess.listenerCount("error"), 0);
+    } finally {
+      process.off("uncaughtException", onUncaught);
+      // No-op once the fixture has exited; stops it if an assertion failed first.
+      subprocess.kill();
+    }
+  });
+});
+
 function trackChild(child: ChildProcess, cleanupPids: Set<number>): number {
   const pid = child.pid;
   assert.equal(typeof pid, "number", "fixture root did not receive a PID");

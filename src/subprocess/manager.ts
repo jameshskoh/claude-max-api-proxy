@@ -249,8 +249,10 @@ export class ClaudeSubprocess extends EventEmitter {
             console.error(`[Subprocess] Process closed with code: ${code}`);
           }
           this.clearTimeout();
-          // Process any remaining buffer
+          // Process any remaining buffer. The final line may lack a trailing
+          // newline (often the result message), so add one to make it complete.
           if (this.buffer.trim()) {
+            this.buffer += "\n";
             this.processBuffer();
           }
           this.emit("close", code);
@@ -383,7 +385,10 @@ export class ClaudeSubprocess extends EventEmitter {
         if (this.process) {
           this.isKilled = killProcessTree(this.process, "SIGTERM");
         }
-        this.emit("error", new Error(`Request timed out after ${timeout}ms`));
+        // Without a listener, emitting "error" would throw inside the timer and crash the process
+        if (this.listenerCount("error") > 0) {
+          this.emit("error", new Error(`Request timed out after ${timeout}ms`));
+        }
       }
     }, timeout);
   }
