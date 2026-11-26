@@ -169,6 +169,10 @@ export class ClaudeSubprocess extends EventEmitter {
   private buffer: string = "";
   private timeoutId: NodeJS.Timeout | null = null;
   private isKilled: boolean = false;
+  /** Last ~2 KB of the CLI's stderr, kept for diagnostics */
+  private stderrTail: string = "";
+  /** Set once a result message has been parsed from stdout */
+  private sawResult: boolean = false;
 
   /**
    * Start the Claude CLI subprocess with the given prompt
@@ -194,6 +198,11 @@ export class ClaudeSubprocess extends EventEmitter {
           stdio: ["pipe", "pipe", "pipe"],
         });
 
+        // Decode as UTF-8 across chunk boundaries so a multi-byte character
+        // split between two chunks is not corrupted.
+        this.process.stdout?.setEncoding("utf8");
+        this.process.stderr?.setEncoding("utf8");
+
         this.armTimeout(timeout);
 
         // Handle spawn errors (e.g., claude not found). spawn() reports these
@@ -212,6 +221,15 @@ export class ClaudeSubprocess extends EventEmitter {
           }
         });
 
+        // The CLI may exit before reading a large prompt, which raises EPIPE on
+        // stdin. Without a listener that would crash the proxy. The "close"
+        // event carries the exit code and drives the error reply.
+        this.process.stdin?.on("error", (err) => {
+          if (process.env.DEBUG_SUBPROCESS) {
+            console.error("[Subprocess] stdin error:", err.message);
+          }
+        });
+
         // Pass prompt via stdin to avoid E2BIG on large inputs
         this.process.stdin?.write(prompt);
         this.process.stdin?.end();
@@ -221,18 +239,18 @@ export class ClaudeSubprocess extends EventEmitter {
         }
 
         // Parse JSON stream from stdout
-        this.process.stdout?.on("data", (chunk: Buffer) => {
-          const data = chunk.toString();
+        this.process.stdout?.on("data", (chunk: string) => {
           if (process.env.DEBUG_SUBPROCESS) {
-            console.error(`[Subprocess] Received ${data.length} bytes of stdout`);
+            console.error(`[Subprocess] Received ${chunk.length} bytes of stdout`);
           }
-          this.buffer += data;
+          this.buffer += chunk;
           this.processBuffer();
         });
 
         // Capture stderr for debugging
-        this.process.stderr?.on("data", (chunk: Buffer) => {
-          const errorText = chunk.toString().trim();
+        this.process.stderr?.on("data", (chunk: string) => {
+          this.stderrTail = (this.stderrTail + chunk).slice(-2048);
+          const errorText = chunk.trim();
           if (errorText) {
             // Don't emit as error unless it's actually an error
             // Claude CLI may write debug info to stderr
@@ -253,6 +271,13 @@ export class ClaudeSubprocess extends EventEmitter {
           if (this.buffer.trim()) {
             this.buffer += "\n";
             this.processBuffer();
+          }
+          // Surface the CLI's stderr when it failed or never produced a result,
+          // since that is the only clue to why
+          if ((code !== 0 || !this.sawResult) && this.stderrTail.trim()) {
+            console.error(
+              `[Subprocess] CLI stderr (exit code ${code}):\n${this.stderrTail.trim()}`
+            );
           }
           this.emit("close", code);
         });
@@ -317,8 +342,17 @@ export class ClaudeSubprocess extends EventEmitter {
       const trimmed = line.trim();
       if (!trimmed) continue;
 
+      let message: ClaudeCliMessage;
       try {
-        const message: ClaudeCliMessage = JSON.parse(trimmed);
+        message = JSON.parse(trimmed);
+      } catch {
+        // Non-JSON output, emit as raw
+        this.emit("raw", trimmed);
+        continue;
+      }
+
+      // A throwing listener must not abort parsing of the rest of the stream
+      try {
         this.emit("message", message);
 
         if (isTextBlockStart(message)) {
@@ -344,11 +378,11 @@ export class ClaudeSubprocess extends EventEmitter {
         } else if (isAssistantMessage(message)) {
           this.emit("assistant", message);
         } else if (isResultMessage(message)) {
+          this.sawResult = true;
           this.emit("result", message);
         }
-      } catch {
-        // Non-JSON output, emit as raw
-        this.emit("raw", trimmed);
+      } catch (err) {
+        console.error("[Subprocess] Event listener threw:", err);
       }
     }
   }
@@ -397,6 +431,19 @@ export class ClaudeSubprocess extends EventEmitter {
    */
   isRunning(): boolean {
     return this.process !== null && !this.isKilled && this.process.exitCode === null;
+  }
+
+  /**
+   * Last non-empty line of the CLI's stderr tail, trimmed and cut to 300
+   * characters. Returns "" when stderr has produced no text.
+   */
+  stderrLastLine(): string {
+    const lines = this.stderrTail
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    const last = lines[lines.length - 1] ?? "";
+    return last.slice(0, 300);
   }
 }
 
