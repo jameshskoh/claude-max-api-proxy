@@ -22,11 +22,11 @@ flowchart TD
 
 **Notes**
 
-- The LaunchAgent runs `dist/server/standalone.js`. Only the CLI check can stop startup. The auth check never fails, so a CLI that is not logged in still starts. Errors show up on the first real request.
+- `npm start` runs the standalone server. The optional LaunchAgent (see section 7) can run the same server. Only the CLI check can stop startup. The auth check never fails, so a CLI that is not logged in still starts. Errors show up on the first real request.
 - Stopping the server closes the listener and waits for open connections. An in-flight streaming response delays exit (inferred, not tested).
 - Shutdown does not signal CLI children itself. Run by hand, a running `claude` can outlive the server. Under launchd, stopping the job also kills the rest of its process group unless the plist sets `AbandonProcessGroup`, so children are normally cleaned up (inferred, not tested).
 
-**Plugin path (not how the service runs today)**
+**Plugin path (not how the proxy is normally run)**
 
 The plugin entry registers a provider. The provider's auth flow repeats the CLI and auth checks, asks for a port, starts the server, and returns a config that points the host at `http://127.0.0.1:<port>/v1`. The plugin's unload hook stops the server. Nothing in the LaunchAgent setup uses this path.
 
@@ -46,10 +46,12 @@ Each HTTP request passes these steps in order.
 10. **Branch.** `stream: true` takes the streaming path. Otherwise the non-streaming path runs.
 11. **Outer catch.** A synchronous throw becomes a 500, unless headers were already sent.
 
+Steps 5 and later write the request summary line described in the dev loop section, whatever the outcome. A request that fails before step 5, such as an unparseable body or an unknown path, gets no summary line; the body parser prints its own error instead.
+
 **Gotchas**
 
 - A request without a JSON content type gets 400 `invalid_messages`, because the body is never parsed. `curl -d` sends `application/x-www-form-urlencoded` by default, so always pass `-H "Content-Type: application/json"` (inferred from body-parser behaviour, not run).
-- A JSON body of `null` makes the `stream` read throw outside the handler's `try`. The rejection is unhandled and the process exits (inferred, not run). `KeepAlive` in the LaunchAgent restarts it.
+- A JSON body of `null` makes the `stream` read throw outside the handler's `try`. The rejection is unhandled and the process exits (inferred, not run). Under the optional LaunchAgent, `KeepAlive` restarts it. Run by hand, it stays down until you start it again.
 
 ## 3. Subprocess lifecycle
 
@@ -134,7 +136,7 @@ sequenceDiagram
 
 - There is no client-disconnect handler in this path. If the client leaves, the CLI runs until it exits or times out (inferred).
 - Non-streaming does not use `assistant` events. The response is built from the `result` message alone.
-- With active tools, the body is a tool-call reply when blocks parse: `content` is the leftover text or null, `tool_calls` is set, and `finish_reason` is `tool_calls`. If a block does not parse, the body is the plain text with `stop`.
+- With active tools, the body is a tool-call reply when blocks parse: `content` is the leftover text or null, `tool_calls` is set, and `finish_reason` is `tool_calls`. If any block is malformed, the body is the plain text with `stop`, and a warning is logged.
 - The reply's `model` is the requested ID with any provider prefix removed, not a name reported by the CLI.
 
 ### 4.2 Streaming
@@ -185,13 +187,13 @@ data: [DONE]
 - **Child exits 0 with no result**: writes `[DONE]` and ends, with no error line (inferred from code).
 - **Timeout error**: clears the session if resuming, writes an error line, ends. No `[DONE]`.
 - **Active tools, reply has valid tool-call blocks**: the leftover text (if any) is one content chunk, then one chunk with all the `tool_calls`, then the done chunk with finish reason `tool_calls`.
-- **Active tools, reply has no blocks or a malformed one**: the whole text goes out as one content chunk, and the done chunk has finish reason `stop`. A malformed block is logged as a warning.
+- **Active tools, reply has no blocks or a malformed one**: the whole text goes out as one content chunk, and the done chunk has finish reason `stop`. A malformed block (the rules are under Fallback to text in ARCHITECTURE) is logged as a warning that carries the request ID and up to 200 characters of the failing block.
 
 **Rules**
 
 - Every chunk's `model` is the requested ID with any provider prefix removed.
 - With active tools, the model's tool calls are returned as `tool_calls`. The model writes them as tagged JSON blocks at the end of its text, the proxy turns them into calls, and the finish reason becomes `tool_calls`. Streaming holds all text until the run ends in that case. See [run-cli-as-plain-llm-with-prompt-tool-calls](adrs/run-cli-as-plain-llm-with-prompt-tool-calls.md).
-- Usage comes from the result message's `usage`. It is missing when the CLI omits it.
+- Usage comes from the result message's `usage`, mapped as the response shapes in ARCHITECTURE describe. The done chunk omits `usage` when the CLI result has none.
 - See [stream-text-deltas-as-sse](adrs/stream-text-deltas-as-sse.md) for why streaming works this way.
 
 ## 5. Session lifecycle
@@ -268,6 +270,14 @@ curl -s http://127.0.0.1:3456/v1/chat/completions \
 
 Use `curl -N` for streaming, or curl buffers the SSE output. Send a second request with the same `user` to exercise the resume path.
 
+**Request summary line (always on).** Each chat-completion request writes one line to the console when it finishes: after a success, after an error (validation errors included), or when the client disconnects. No flag controls it. Example:
+
+```
+[req 3f2a9c1e] model=claude-haiku-4-5 stream=true messages=4 tools=2 finish=tool_calls tool_calls=1 prompt=2048 cached=1900 completion=87 reasoning=0 1532ms
+```
+
+The fields, in order: the request ID (the same ID as the `X-Request-Id` header on streaming responses, and the part after `chatcmpl-` in the response ID), the model as the client sent it, the stream flag, the message count, the tool count, `finish` (`stop`, `tool_calls`, `error` or `aborted`), the number of tool calls returned, the prompt, cached, completion and reasoning tokens, and the duration. A token field shows `-` when the request produced no usage, as for errors and aborts. An error line ends with the error message in quotes, cut to 200 characters. The line holds no prompt or reply text. The exception is the tool-call warning, which is printed whether or not `DEBUG` is set and quotes up to 200 characters of a malformed block from the reply.
+
 **Environment variables**
 
 - `DEBUG`: one line per request, the first 200 characters of each body, and the first 300 characters on a parse error. Without `DEBUG`, a parse error logs only length, method and URL.
@@ -275,7 +285,7 @@ Use `curl -N` for streaming, or curl buffers the SSE output. Send a second reque
 - `CLAUDE_BIN`: runs this binary instead of `claude`. Useful for pointing at a fake CLI.
 - `CLAUDECODE` is always removed from the child environment.
 
-Both debug flags log prompt fragments. Keep them off in the LaunchAgent.
+Both debug flags log prompt fragments, so keep them off in normal use.
 
 ### Tests
 
@@ -287,7 +297,7 @@ Both debug flags log prompt fragments. Keep them off in the LaunchAgent.
 
 ### Running as a macOS LaunchAgent
 
-This section replaces the old `docs/macos-setup.md` (removed after commit `2074263`), which used the label `com.claude-code-provider` and logged to `/tmp`. The values below come from `CLAUDE.md`.
+This section replaces the old `docs/macos-setup.md` (removed after commit `2074263`), which used the label `com.claude-code-provider` and logged to `/tmp`. This section is optional and is an example setup. The plist is not in this repo, so write it yourself and change the label, paths and user to match your machine. The normal way to run the proxy is `npm start`.
 
 - **Label:** `com.openclaw.claude-max-proxy`
 - **Plist:** `~/Library/LaunchAgents/com.openclaw.claude-max-proxy.plist`
@@ -390,7 +400,7 @@ rm ~/Library/LaunchAgents/com.openclaw.claude-max-proxy.plist
 
 The service has no authentication, sends `Access-Control-Allow-Origin: *`, and passes the CLI's skip-permissions flag. The CLI runs with no built-in tools, so a request cannot make it run shell commands or edit files on this machine; the skip flag guards nothing in practice. Read [bad-coding-practices section 3](security-review/bad-coding-practices.md#3-gotchas-if-you-dont-change-the-code) before you load it.
 
-- Stop the service when you are not using it (`bootout`).
+- If the service is loaded, stop it (`bootout`) when you are not using it.
 - Never expose port 3456 beyond loopback.
 - Keep `DEBUG` and `DEBUG_SUBPROCESS` unset, and keep logs out of `/tmp`.
 - See [telemetry.md](security-review/telemetry.md) for what the CLI sends and which variables turn it off.

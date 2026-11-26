@@ -2,7 +2,7 @@
 
 - **Status:** Accepted, with known issues
 - **Introduced:** 0a70bdd, 2026-01-25, Atal Agarwal
-- **Revised:** 2026-11-25
+- **Revised:** 2026-11-26
 
 ## Context
 
@@ -28,7 +28,6 @@
   - A client disconnect stops the CLI.
 - **Bad:**
   - With active tools, no text reaches the client until the turn ends, so the real-time benefit is lost for those requests.
-  - `usage` counts `input_tokens` and `output_tokens` only. Cache tokens are left out, so the reported prompt size is low.
   - After headers are sent, an error cannot change the HTTP status. Clients must read the error line.
 
 ## Affected components
@@ -40,4 +39,3 @@ The streaming path of the request handlers (SSE headers, disconnect handling, th
 - The CLI changes its stream format or drops `--include-partial-messages`.
 - Clients need tool calls streamed as they are generated, instead of at the end of the turn.
 - Streaming and non-streaming results must match exactly.
-- Clients need cache-token usage.

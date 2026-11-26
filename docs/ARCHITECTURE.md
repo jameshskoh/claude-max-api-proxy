@@ -16,7 +16,7 @@ Runtime flows are in [WORKFLOW.md](WORKFLOW.md), and the reasons for design choi
 
 - The fork was once tuned for OpenClaw. Its prompt adaptation (stripping OpenClaw sections, mapping OpenClaw tool names to Claude Code tools) has been removed. Client tools are now passed to the model as text in a proxy-built system prompt. See [run-cli-as-plain-llm-with-prompt-tool-calls](adrs/run-cli-as-plain-llm-with-prompt-tool-calls.md).
 - Security effect: the CLI cannot run shell commands, edit files or fetch URLs on this machine, because it has no tools. The skip-permissions flag is still passed, but with no tools it guards nothing in practice.
-- It was designed as a Clawdbot provider plugin (old `DESIGN.md`), but it runs as a standalone server under a macOS LaunchAgent. The plugin entry still exists. The plist is not in this repo; see [WORKFLOW.md](WORKFLOW.md#running-as-a-macos-launchagent).
+- It was designed as a Clawdbot provider plugin (old `DESIGN.md`), but it runs as a standalone server, normally started by hand. An optional macOS LaunchAgent can start it automatically. The plugin entry still exists. The plist is not in this repo; see [WORKFLOW.md](WORKFLOW.md#running-as-a-macos-launchagent).
 - Clawdbot's provider system handles authentication only, not API execution (old root `ARCHITECTURE.md`). So this proxy is a local endpoint that the provider's base URL points at, not a backend inside Clawdbot. See [local-openai-proxy-over-clawdbot-backend](adrs/local-openai-proxy-over-clawdbot-backend.md).
 - The CLI keeps the credentials in the OS keychain. The proxy never reads them. Old `DESIGN.md` says `~/.claude/credentials.json`, which is stale.
 - `total_cost_usd` in the CLI result is subscription usage, not API billing (old `PROTOCOL.md`). The proxy does not read it.
@@ -39,8 +39,8 @@ Runtime flows are in [WORKFLOW.md](WORKFLOW.md), and the reasons for design choi
 **Client tool calling**
 
 - **Active tools.** A request has active tools when its `tools` list is non-empty and `tool_choice` is not `"none"`. Only then are the tool catalog added to the system prompt and the reply text checked for tool calls. Otherwise the request is a plain chat, and any `tools` field is ignored.
-- **Calls out of text.** The model is told to end its reply with one block per call. Each block is a tagged JSON object with a tool name and arguments. The proxy removes the blocks from the reply text and returns them as OpenAI `tool_calls`. Each call gets a generated ID (`call_` followed by 32 hex characters), and its arguments are a JSON string. The message content is the text left over, or null if nothing is left. The finish reason becomes `tool_calls`.
-- **Fallback to text.** If any block is malformed or names a tool the request did not declare, the proxy logs a warning and returns the whole reply as plain text with finish reason `stop`. The client then sees the raw tool-call markup.
+- **Calls out of text.** The model is told to end its reply with one block per call. Each block is a tagged JSON object with a tool name and arguments, and the object ends at its matching closing brace, so a string argument may contain a literal closing tag. The proxy removes the blocks from the reply text and returns them as OpenAI `tool_calls`. Each call gets a generated ID (`call_` followed by 32 hex characters), and its arguments are a JSON string. The message content is the text left over, or null if nothing is left. The finish reason becomes `tool_calls`.
+- **Fallback to text.** If any block is malformed, the proxy logs a warning and returns the whole reply as plain text with finish reason `stop`. A block is malformed if its JSON is invalid or not an object, its object never closes, no closing tag follows it, its arguments are neither an object nor a string holding valid JSON, or it names a tool the request did not declare. An opening tag with no object after it is ordinary text, not a block. The warning carries the request ID and up to 200 characters of the failing block. The whole reply goes back rather than only the good calls, so the client sees no tool call and can re-prompt (see the ADR). The client then sees the raw tool-call markup.
 - **Advisory tool choice.** `tool_choice` set to required or to a named function adds a sentence to the system prompt asking for a call. Nothing checks that a call was made.
 - **Results.** Client tool results come back as `tool` messages. The next prompt shows them as tool-result blocks, with the function name looked up from the matching earlier call.
 
@@ -59,7 +59,7 @@ Runtime flows are in [WORKFLOW.md](WORKFLOW.md), and the reasons for design choi
 
 - Port as the first argument, default 3456.
 - `CLAUDE_BIN` selects the CLI binary.
-- `DEBUG` logs requests and body prefixes. `DEBUG_SUBPROCESS` logs spawn arguments, prompt prefixes and stdout sizes.
+- `DEBUG` logs requests and body prefixes. `DEBUG_SUBPROCESS` logs spawn arguments, prompt prefixes and stdout sizes. Separately, every chat-completion request writes one summary line when it finishes. No flag turns it on or off (see [WORKFLOW.md](WORKFLOW.md#dev-loop)).
 - Startup checks that the CLI runs. The auth check is a no-op.
 - Windows: resolves the bundled `claude.exe` behind the npm shim and kills the whole process tree. See [resolve-windows-exe-and-kill-process-tree](adrs/resolve-windows-exe-and-kill-process-tree.md).
 - A 15-minute timeout per request. LaunchAgent setup is in [WORKFLOW.md](WORKFLOW.md#running-as-a-macos-launchagent).
@@ -106,7 +106,7 @@ Runtime flows are in [WORKFLOW.md](WORKFLOW.md), and the reasons for design choi
 | Proxy internals | Active tools | A request with non-empty `tools` and a `tool_choice` other than `"none"`. Only these get the tool catalog and tool-call parsing. |
 | Proxy internals | Tool-call block | The tagged JSON the model writes at the end of its reply to request a call. Parsed into a tool call. |
 | Proxy internals | Tool-result block | The tagged wrapper that carries a client tool's output into the next prompt. |
-| Host apps | OpenClaw | The original main client. Its prompt adaptation has been removed, but the LaunchAgent label still says `openclaw`. |
+| Host apps | OpenClaw | The original main client. Its prompt adaptation has been removed, but the example LaunchAgent label in the optional setup in [WORKFLOW.md](WORKFLOW.md#running-as-a-macos-launchagent) still says `openclaw`. |
 | Host apps | Clawdbot | The host the original plugin targeted (old `DESIGN.md`). `clawdbot` is an optional peer dependency. This doc does not say whether Clawdbot and OpenClaw are the same project. Treat them as separate names. |
 
 **How these connect**
@@ -147,7 +147,8 @@ This table is the one place that maps components to files. The rest of the docs 
 | Standalone entry | `src/server/standalone.ts` | What runs. Parses the port, runs the startup checks, starts the server, handles SIGINT and SIGTERM. |
 | Plugin entry | `src/index.ts` | Clawdbot provider plugin, the models it advertises, and the library exports. |
 | HTTP app | `src/server/index.ts` | Express app: body parsing, debug log, CORS, routing, 404, error handler, listen and stop. |
-| Request handlers | `src/server/routes.ts` | Chat completions (validation, model check, session resolution, streaming and non-streaming paths, and tool-call handling when tools are active), models, health. |
+| Request handlers | `src/server/routes.ts` | Chat completions (validation, model check, session resolution, streaming and non-streaming paths, and tool-call handling when tools are active), models, health. Also decides when each chat-completion request has finished, for the summary line. |
+| Request log | `src/server/request-log.ts` | Formats the one-line summary written for each chat-completion request, from fields the request handlers collect. Formatting only. |
 | Request adapter | `src/adapter/openai-to-cli.ts` | The supported-model list and its check, prompt flattening for user, assistant and tool messages, and the delta prompt. |
 | Tool protocol | `src/adapter/tools.ts` | Builds the system prompt (base line, system and developer text, tool catalog and calling protocol). Renders tool calls and tool results as text for the prompt. Parses tool-call blocks out of reply text. |
 | Response adapter | `src/adapter/cli-to-openai.ts` | Builds the non-streaming body (with `tool_calls` when present) and the streaming chunks: text deltas, the tool-call chunk and the done chunk. |
@@ -212,10 +213,10 @@ Only `Content-Type: application/json` is parsed. Any other content type leaves `
 ```json
 {"id":"chatcmpl-<24 hex>","object":"chat.completion","created":1767000000,"model":"claude-sonnet-5-5",
  "choices":[{"index":0,"message":{"role":"assistant","content":"…"},"finish_reason":"stop"}],
- "usage":{"prompt_tokens":2,"completion_tokens":13,"total_tokens":15}}
+ "usage":{"prompt_tokens":2054,"completion_tokens":13,"total_tokens":2067,"prompt_tokens_details":{"cached_tokens":2041},"completion_tokens_details":{"reasoning_tokens":0}}}
 ```
 
-`model` is the requested ID with any provider prefix removed. There is no `X-Request-Id` header on this path.
+`model` is the requested ID with any provider prefix removed. There is no `X-Request-Id` header on this path. `usage` is always present here, with zero counts when the CLI reported none. Its fields map from the CLI result as follows: `prompt_tokens` is fresh input plus cache reads and cache writes, because Anthropic's input count leaves out cached tokens; `completion_tokens` is output tokens; `prompt_tokens_details.cached_tokens` is cache reads; and `completion_tokens_details.reasoning_tokens` is thinking tokens, which are already inside `completion_tokens`.
 
 When active tools find tool-call blocks, the message carries a `tool_calls` array, `content` is the leftover text or null, and `finish_reason` is `tool_calls`. Each call has an ID of `call_` followed by 32 hex characters, type `function`, and arguments as a JSON string. In every other case there is no `tool_calls` field and the finish reason is `stop`, including when a block was malformed and the whole text was returned.
 
@@ -230,12 +231,12 @@ data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":…,"model
 
 data: {…,"choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":null}]}
 
-data: {…,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":13,"total_tokens":15}}
+data: {…,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2054,"completion_tokens":13,"total_tokens":2067,"prompt_tokens_details":{"cached_tokens":2041},"completion_tokens_details":{"reasoning_tokens":0}}}
 
 data: [DONE]
 ```
 
-The first chunk has `role`. Every chunk, including the done chunk, carries the requested ID (prefix removed) as `model`. The usage block appears only if the CLI result had usage. `:ok` is the first line, sent before the subprocess starts.
+The first chunk has `role`. Every chunk, including the done chunk, carries the requested ID (prefix removed) as `model`. The usage block has the same fields as the non-streaming body. It appears only if the CLI result had usage. `:ok` is the first line, sent before the subprocess starts.
 
 With active tools, no text reaches the client until the CLI run ends. After that the client gets, in order: a content chunk with the leftover text, if there is any; one chunk whose delta carries `tool_calls`, each with its index, ID, type and function; and the done chunk with finish reason `tool_calls`, then usage and `[DONE]`. The `role` field sits on whichever of those two chunks is first. If tool-call parsing fails, the whole text goes out as one content chunk and the done chunk has finish reason `stop`.
 
@@ -257,6 +258,7 @@ With active tools, no text reaches the client until the CLI run ends. After that
 | Host | `127.0.0.1` | Library callers of the server start function can pass a host. Nothing in the repo does, and there is no CLI or env option. |
 | `DEBUG` | off | Logs request lines and body prefixes (200 and 300 characters). |
 | `DEBUG_SUBPROCESS` | off | Logs CLI arguments (which include the system prompt), a 200-character prompt prefix, stdout sizes and stderr. |
+| Request summary line | always on | One line per chat-completion request when it finishes. No setting turns it off. Format in [WORKFLOW.md](WORKFLOW.md#dev-loop). |
 | `CLAUDE_BIN` | `claude` | Not cached, so changes take effect at the next spawn. |
 | Request timeout | 15 min | The subprocess accepts a custom timeout, but no caller passes one. |
 | Session TTL | 6 h idle | |
@@ -344,17 +346,16 @@ Shape examples, trimmed from old `PROTOCOL.md` (captured output, not a spec):
 | Startup checks | Standalone entry | CLI and auth checks (subprocess manager) | None |
 | Clawdbot plugin | Plugin entry | Legacy session manager | [local-openai-proxy-over-clawdbot-backend](adrs/local-openai-proxy-over-clawdbot-backend.md) |
 | Spawn options, cwd or env | Spawn (subprocess manager) | The `CLAUDECODE` filter | [spawn-one-cli-process-per-request](adrs/spawn-one-cli-process-per-request.md) |
-| Logging | `DEBUG` (HTTP app) | `DEBUG_SUBPROCESS` (subprocess manager); logs use `console` throughout | None |
+| Logging | The summary line: request log (formatting) and request handlers (when a request finishes); the tool-call warning (tool protocol) | Usage mapping (response adapter); `DEBUG` (HTTP app) and `DEBUG_SUBPROCESS` (subprocess manager), which add detail only when set. Logs use `console` throughout. | None |
 
 ## Sharp edges
 
 Items marked **inferred** come from reading the code. They have not been run.
 
 - **A JSON `null` body crashes the process.** `JSON.parse("null")` makes the body `null`. The handler reads `body.stream` before its `try` block. The async handler rejects, and Express 4 does not catch that. Node exits on an unhandled rejection by default. Also in the [security review](security-review/bad-coding-practices.md).
-- **Input token counts are low when caching is used.** Only `input_tokens` and `output_tokens` are copied. The cache token fields exist in the CLI result and are dropped. The old `PROTOCOL.md` example reports `input_tokens: 2` next to `cache_creation_input_tokens: 42255`.
 - **CLI error results look like successes.** `is_error` and `subtype` are never read, and the finish reason is `"stop"` unless tool calls were parsed. A failed run can come back as HTTP 200 with the error text as content. The session is still saved for that turn, so the next turn resumes after the failed one. **Inferred.**
 - **Streaming and non-streaming can return different text.** Streaming forwards every text delta, with separators between blocks. Non-streaming returns only the result message's final text. They can differ when the CLI emits several text blocks. **Inferred.**
-- **Text-parsed tool calls fall back to plain text.** If any tool-call block is malformed or names a tool the request did not declare, the whole reply goes back as text with finish reason `stop`. Only a server log line records the failure, so the client sees the raw markup and may not realise a call was intended.
+- **Text-parsed tool calls fall back to plain text.** If any tool-call block is malformed (see Fallback to text), the whole reply goes back as text with finish reason `stop`. Only a server log line records the failure, so the client sees the raw markup and may not realise a call was intended. This is deliberate: keeping only the valid calls could lose work silently.
 - **Tool choice is advisory.** `required` and the named-function choice only add a sentence to the system prompt. A reply with no block is a normal text reply, and nothing retries it.
 - **Streaming with active tools is buffered.** The client sees nothing until the whole CLI run ends, so a long run looks like a stall. Text then arrives as one chunk, not as a stream.
 - **Tool call IDs are not kept.** The proxy makes new IDs for each reply and stores none. A later tool result is matched by the ID the client sends. Its name is looked up from the request history, and it is left out when the call is not there.
@@ -363,7 +364,7 @@ Items marked **inferred** come from reading the code. They have not been run.
 - **A shrunken history floods the resumed session.** If `messages` gets shorter than the stored `messageCount`, the delta is empty, and the full history is sent into the resumed session. Edits that keep the length the same are not sent, because only the tail is. **Inferred.**
 - **Two concurrent requests with the same `user` share one session.** Nothing serializes turns, and both `--resume` the same ID. Behaviour under concurrent `--resume` is untested.
 - **The session map is lost on restart.** It lives in process memory. The next turn starts a new CLI session with the full history. The CLI's own transcripts stay on disk.
-- **A non-streaming client that disconnects does not stop the CLI.** Only the streaming path listens for the response closing. The CLI runs until it finishes or hits the 15-minute timeout. **Inferred.**
+- **A non-streaming client that disconnects does not stop the CLI.** Only the streaming path listens for the response closing. The CLI runs until it finishes or hits the 15-minute timeout. Its summary line is written at the disconnect, as `aborted`, with no token counts. **Inferred.**
 - **On macOS and Linux, kill signals only the direct child.** Descendants are not reached. Timeouts and client disconnects both use this path. Windows uses `taskkill /T`.
 - **Listener exceptions are swallowed.** Stdout parsing wraps event emission in the same `try` as the JSON parse. A throw in a request-handler listener becomes a `raw` event that nothing listens to, so the failure is silent. **Inferred.**
 - **The auth check always passes.** A logged-out CLI shows up on the first request, not at startup.

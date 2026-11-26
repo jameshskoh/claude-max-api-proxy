@@ -2,7 +2,7 @@
 
 - **Status:** Accepted, with known issues
 - **Introduced:** 78fcbaf, 2026-02-18, Krzysztof Wende
-- **Revised:** 2026-11-25
+- **Revised:** 2026-11-26
 
 ## Context
 
@@ -30,7 +30,9 @@
   - earlier assistant turns are rendered as their text, plus a tool-call block for each call they made;
   - tool messages are rendered as a tool-result block that carries the call ID and the tool name.
 - Replies with active tools: `<tool_call>` blocks are parsed out of the final text into OpenAI `tool_calls`, with generated IDs and arguments as a JSON string. The remaining text becomes `content` (or null), and `finish_reason` is `tool_calls`.
-- If any block is malformed (invalid JSON or an unknown tool name), the whole raw text is returned as a plain reply with `finish_reason` `stop`, and a warning is logged.
+- Block boundaries: a block starts at an opening tag that is followed by a JSON object. The object ends at its matching closing brace. Braces, tags and escapes inside JSON strings are ignored, so an argument may contain a literal closing tag. The closing tag must follow the object. An opening tag with no object after it is ordinary text, not a block.
+- A block is malformed if its JSON is invalid or not an object, its object never closes, no closing tag follows it, its arguments are neither an object nor a string holding valid JSON, or it names a tool the request did not declare.
+- If any block is malformed, the whole raw text is returned as a plain reply with `finish_reason` `stop`, and a warning is logged. The warning carries the request ID and up to 200 characters of the failing block. Good blocks in the same reply are not kept.
 - Streaming with active tools: text is buffered until the CLI finishes. The proxy then sends one content chunk (if there is text), one chunk with all tool calls, and the done chunk. Without tools, streaming is incremental as before.
 
 ## Consequences
@@ -39,6 +41,7 @@
   - Clients get real `tool_calls` in the format they expect.
   - The model cannot run commands or touch files, because the CLI has no tools.
   - No OpenClaw-specific prompt is sent.
+  - A reply with a broken block is returned whole, as text, rather than as the calls that parsed. Keeping only the good calls could lose work silently. Say the call that records a finding is broken, but the call that marks the review done is fine. The client would see a finished review with the finding missing, while the reply text says the finding was recorded. Returned as text, the reply shows the client that no call was made, so it can re-prompt. A real client did re-prompt this way and the model corrected itself.
 - **Bad:**
   - Tool calls are parsed from text. A formatting slip by the model becomes a plain text reply with `finish_reason` `stop`, not a tool call.
   - Streaming with tools is not incremental. The client waits for the full reply.
