@@ -402,14 +402,22 @@ async function handleNonStreamingResponse(
 ): Promise<void> {
   return new Promise((resolve) => {
     let finalResult: ClaudeCliResult | null = null;
+    // Set once a response has been written, so a later close is the normal end of the reply
+    let replied = false;
+    // Set when the client left before the reply; the socket is gone, so nothing is sent
+    let clientGone = false;
     subprocess.on("result", (result: ClaudeCliResult) => {
       finalResult = result;
     });
 
-    // Non-streaming has no disconnect handling of its own; a client that goes
-    // away before the reply is logged as aborted. Ignored if already logged.
+    // Handle actual client disconnect before the reply was sent - kill subprocess,
+    // since its result would have nowhere to go. A close after the reply is ignored.
     res.on("close", () => {
-      summarize({ finish: "aborted" });
+      if (!replied) {
+        clientGone = true;
+        summarize({ finish: "aborted" });
+        subprocess.kill();
+      }
     });
 
     subprocess.on("error", (error: Error) => {
@@ -418,24 +426,29 @@ async function handleNonStreamingResponse(
       if (sessionCtx.resume && sessionCtx.sessionKey) {
         clearSession(sessionCtx.sessionKey);
       }
-      res.status(500).json({
-        error: {
-          message: error.message,
-          type: "server_error",
-          code: null,
-        },
-      });
+      if (!clientGone) {
+        replied = true;
+        res.status(500).json({
+          error: {
+            message: error.message,
+            type: "server_error",
+            code: null,
+          },
+        });
+      }
       resolve();
     });
 
     subprocess.on("close", (code: number | null) => {
-      if (finalResult) {
+      // A result that arrives after the client left is dropped: not saved, not sent
+      if (finalResult && !clientGone) {
         if (sessionCtx.sessionKey && cliInput.sessionId) {
           setSession(sessionCtx.sessionKey, cliInput.sessionId, sessionCtx.messageCount);
         }
         const toolReply = toolNames
           ? parseToolCalls(finalResult.result, toolNames, requestId)
           : null;
+        replied = true;
         res.json(
           toolReply
             ? cliResultToOpenai(
@@ -452,13 +465,20 @@ async function handleNonStreamingResponse(
           toolCalls: toolReply?.toolCalls.length ?? 0,
           usage: finalResult.usage ? cliUsageToOpenai(finalResult.usage) : undefined,
         });
+      } else if (finalResult) {
+        // The client left but the CLI finished anyway. A resumed session now
+        // holds a reply the client never got, so drop it instead of resuming it.
+        if (sessionCtx.resume && sessionCtx.sessionKey) {
+          clearSession(sessionCtx.sessionKey);
+        }
       } else {
         const message = `Claude CLI exited with code ${code} without response`;
         summarize({ finish: "error", error: message });
         if (sessionCtx.resume && sessionCtx.sessionKey) {
           clearSession(sessionCtx.sessionKey);
         }
-        if (!res.headersSent) {
+        if (!clientGone && !res.headersSent) {
+          replied = true;
           res.status(500).json({
             error: {
               message: `Claude CLI exited with code ${code} without response`,
@@ -481,13 +501,16 @@ async function handleNonStreamingResponse(
       })
       .catch((error) => {
         summarize({ finish: "error", error: error.message });
-        res.status(500).json({
-          error: {
-            message: error.message,
-            type: "server_error",
-            code: null,
-          },
-        });
+        if (!clientGone) {
+          replied = true;
+          res.status(500).json({
+            error: {
+              message: error.message,
+              type: "server_error",
+              code: null,
+            },
+          });
+        }
         resolve();
       });
   });
