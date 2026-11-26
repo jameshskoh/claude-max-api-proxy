@@ -88,10 +88,18 @@ export interface OpenAIChatResponse {
   created: number;
   model: string;
   choices: OpenAIChatResponseChoice[];
-  usage: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
+  usage: OpenAIUsage;
+}
+
+export interface OpenAIUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  prompt_tokens_details?: {
+    cached_tokens: number;
+  };
+  completion_tokens_details?: {
+    reasoning_tokens: number;
   };
 }
 
@@ -113,11 +121,7 @@ export interface OpenAIChatChunk {
   created: number;
   model: string;
   choices: OpenAIChatChunkChoice[];
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
+  usage?: OpenAIUsage;
 }
 
 export interface OpenAIModel {

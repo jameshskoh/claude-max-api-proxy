@@ -8,7 +8,34 @@ import type {
   OpenAIChatResponse,
   OpenAIChatChunk,
   OpenAIToolCall,
+  OpenAIUsage,
 } from "../types/openai.js";
+
+/**
+ * Convert CLI token usage to OpenAI usage. Anthropic's input_tokens leaves out
+ * cached tokens, so prompt_tokens adds cache reads and cache writes back in.
+ * Thinking tokens are already part of output_tokens, as reasoning tokens are
+ * part of OpenAI's completion_tokens, so they are only broken out as a detail.
+ * Missing usage or missing fields count as zero.
+ */
+export function cliUsageToOpenai(
+  usage: ClaudeCliResult["usage"] | undefined
+): OpenAIUsage {
+  const inputTokens = usage?.input_tokens || 0;
+  const outputTokens = usage?.output_tokens || 0;
+  const cacheReadTokens = usage?.cache_read_input_tokens || 0;
+  const cacheCreationTokens = usage?.cache_creation_input_tokens || 0;
+  const thinkingTokens = usage?.output_tokens_details?.thinking_tokens || 0;
+  const promptTokens = inputTokens + cacheReadTokens + cacheCreationTokens;
+
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: outputTokens,
+    total_tokens: promptTokens + outputTokens,
+    prompt_tokens_details: { cached_tokens: cacheReadTokens },
+    completion_tokens_details: { reasoning_tokens: thinkingTokens },
+  };
+}
 
 /**
  * Extract text content from Claude CLI assistant message
@@ -129,11 +156,6 @@ export function cliResultToOpenai(
         finish_reason: hasToolCalls ? "tool_calls" : "stop",
       },
     ],
-    usage: {
-      prompt_tokens: result.usage?.input_tokens || 0,
-      completion_tokens: result.usage?.output_tokens || 0,
-      total_tokens:
-        (result.usage?.input_tokens || 0) + (result.usage?.output_tokens || 0),
-    },
+    usage: cliUsageToOpenai(result.usage),
   };
 }

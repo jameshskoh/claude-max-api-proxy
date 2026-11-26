@@ -10,6 +10,7 @@ import { ClaudeSubprocess } from "../subprocess/manager.js";
 import { openaiToCli, openaiToCliDelta, extractModel, SUPPORTED_MODELS } from "../adapter/openai-to-cli.js";
 import {
   cliResultToOpenai,
+  cliUsageToOpenai,
   createDeltaChunk,
   createDoneChunk,
 } from "../adapter/cli-to-openai.js";
@@ -264,12 +265,7 @@ async function handleStreamingResponse(
         // Send final done chunk with finish_reason and usage data
         const doneChunk = createDoneChunk(requestId, responseModel, toolReply ? "tool_calls" : "stop");
         if (result.usage) {
-          doneChunk.usage = {
-            prompt_tokens: result.usage.input_tokens || 0,
-            completion_tokens: result.usage.output_tokens || 0,
-            total_tokens:
-              (result.usage.input_tokens || 0) + (result.usage.output_tokens || 0),
-          };
+          doneChunk.usage = cliUsageToOpenai(result.usage);
         }
         res.write(`data: ${JSON.stringify(doneChunk)}\n\n`);
         res.write("data: [DONE]\n\n");
