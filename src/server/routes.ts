@@ -203,7 +203,7 @@ async function handleStreamingResponse(
   // Send initial comment to confirm connection is alive
   res.write(":ok\n\n");
 
-  return new Promise<void>((resolve, reject) => {
+  return new Promise<void>((resolve) => {
     let isFirst = true;
     const responseModel = cliInput.model;
     let isComplete = false;
@@ -381,9 +381,21 @@ async function handleStreamingResponse(
       sessionId: cliInput.sessionId,
       resume: sessionCtx.resume,
       systemPrompt: cliInput.systemPrompt,
-    }).catch((err) => {
+    }).catch((err: unknown) => {
+      // Start failed before any event could reach the handlers above. Headers
+      // are already sent, so end the stream the same way the error handler does.
+      const message = err instanceof Error ? err.message : "Unknown error";
       console.error("[Streaming] Subprocess start error:", err);
-      reject(err);
+      summarize({ finish: "error", error: message });
+      if (!res.writableEnded) {
+        res.write(
+          `data: ${JSON.stringify({
+            error: { message, type: "server_error", code: null },
+          })}\n\n`
+        );
+        res.end();
+      }
+      resolve();
     });
   });
 }
