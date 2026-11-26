@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Standalone server for testing without Clawdbot
+ * Standalone server entry
  *
  * Usage:
  *   npm run start

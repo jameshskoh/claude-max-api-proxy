@@ -125,7 +125,7 @@ describe("CLI argv for plain-LLM mode", { skip: !WINDOWS_ONLY }, () => {
     assert.ok(argv.includes("--safe-mode"), "expected --safe-mode");
     assert.ok(argv.includes("--system-prompt"), "expected --system-prompt");
     assert.equal(argv[argv.indexOf("--system-prompt") + 1], systemPrompt);
-    assert.ok(!argv.includes("--append-system-prompt"), "OpenClaw append flag must be gone");
+    assert.ok(!argv.includes("--append-system-prompt"), "the append-system-prompt flag must not be used");
   });
 });
 

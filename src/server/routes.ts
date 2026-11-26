@@ -1,7 +1,7 @@
 /**
  * API Route Handlers
  *
- * Implements OpenAI-compatible endpoints for Clawdbot integration
+ * Implements OpenAI-compatible endpoints
  */
 
 import type { Request, Response } from "express";

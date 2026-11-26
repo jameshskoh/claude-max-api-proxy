@@ -1,6 +1,5 @@
 /**
- * Types for OpenAI-compatible API
- * Used for Clawdbot integration
+ * OpenAI Chat Completions API types
  */
 
 export interface OpenAIContentBlock {
