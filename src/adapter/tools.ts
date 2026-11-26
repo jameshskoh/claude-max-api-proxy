@@ -150,7 +150,85 @@ export function toolNamesOf(request: OpenAIChatRequest): Set<string> {
   return new Set((request.tools ?? []).map((tool) => tool.function.name));
 }
 
-const TOOL_CALL_BLOCK = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
+const OPEN_TAG = "<tool_call>";
+const CLOSE_TAG = "</tool_call>";
+
+/** A tool call block found in the text: its JSON object text and its full span. */
+interface ToolCallSpan {
+  json: string;
+  start: number;
+  end: number;
+}
+
+function skipWhitespace(text: string, index: number): number {
+  let i = index;
+  while (i < text.length && /\s/.test(text.charAt(i))) {
+    i++;
+  }
+  return i;
+}
+
+/**
+ * Index just past the `}` that closes the object opening at `start`, or -1 if
+ * the object never closes. Braces, tags and escapes inside JSON strings are
+ * ignored, so a string may contain a literal closing tag.
+ */
+function findObjectEnd(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text.charAt(i);
+    if (inString) {
+      if (ch === "\\") {
+        i++; // skip the escaped character
+      } else if (ch === '"') {
+        inString = false;
+      }
+    } else if (ch === '"') {
+      inString = true;
+    } else if (ch === "{") {
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        return i + 1;
+      }
+    }
+  }
+  return -1;
+}
+
+/**
+ * Find <tool_call> blocks left to right. An opening tag not followed by `{` is
+ * prose and is skipped. A block that never closes stops the scan and is
+ * reported as `error`; blocks found before it are still returned.
+ */
+function scanToolCallBlocks(text: string): {
+  spans: ToolCallSpan[];
+  error: string | null;
+} {
+  const spans: ToolCallSpan[] = [];
+  let open = text.indexOf(OPEN_TAG);
+  while (open !== -1) {
+    const jsonStart = skipWhitespace(text, open + OPEN_TAG.length);
+    if (text.charAt(jsonStart) !== "{") {
+      open = text.indexOf(OPEN_TAG, open + OPEN_TAG.length);
+      continue;
+    }
+    const jsonEnd = findObjectEnd(text, jsonStart);
+    if (jsonEnd === -1) {
+      return { spans, error: "tool call JSON is not closed" };
+    }
+    const closeStart = skipWhitespace(text, jsonEnd);
+    if (!text.startsWith(CLOSE_TAG, closeStart)) {
+      return { spans, error: "tool call block is not closed" };
+    }
+    const end = closeStart + CLOSE_TAG.length;
+    spans.push({ json: text.slice(jsonStart, jsonEnd), start: open, end });
+    open = text.indexOf(OPEN_TAG, end);
+  }
+  return { spans, error: null };
+}
 
 /**
  * Parse <tool_call> blocks out of a model reply into OpenAI tool calls.
@@ -164,21 +242,20 @@ export function parseToolCalls(
   text: string,
   toolNames: Set<string>
 ): { content: string | null; toolCalls: OpenAIToolCall[] } | null {
-  const blocks = [...text.matchAll(TOOL_CALL_BLOCK)];
-  if (blocks.length === 0) {
+  const scan = scanToolCallBlocks(text);
+  if (scan.spans.length === 0 && scan.error === null) {
     return null;
   }
 
   const toolCalls: OpenAIToolCall[] = [];
-  for (const block of blocks) {
-    const reject = (reason: string): null => {
-      console.warn("[tools] Unparseable tool call, returning text:", reason);
-      return null;
-    };
-
+  const reject = (reason: string): null => {
+    console.warn("[tools] Unparseable tool call, returning text:", reason);
+    return null;
+  };
+  for (const span of scan.spans) {
     let payload: unknown;
     try {
-      payload = JSON.parse(block[1]);
+      payload = JSON.parse(span.json);
     } catch {
       return reject("tool call is not valid JSON");
     }
@@ -218,6 +295,16 @@ export function parseToolCalls(
     });
   }
 
-  const content = text.replace(TOOL_CALL_BLOCK, "").trim();
+  if (scan.error !== null) {
+    return reject(scan.error);
+  }
+
+  let kept = "";
+  let cursor = 0;
+  for (const span of scan.spans) {
+    kept += text.slice(cursor, span.start);
+    cursor = span.end;
+  }
+  const content = (kept + text.slice(cursor)).trim();
   return { content: content.length > 0 ? content : null, toolCalls };
 }

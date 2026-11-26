@@ -137,6 +137,90 @@ describe("parseToolCalls", () => {
   it("returns null when the reply has no tool call blocks", () => {
     assert.equal(parseToolCalls("Just a normal answer.", TOOL_NAMES), null);
   });
+
+  it("does not end a block at a closing tag inside a string argument", () => {
+    const commentTools = new Set(["post_comment"]);
+    const block = toolCallBlock({
+      name: "post_comment",
+      arguments: { body: "Stray </tool_call> tag in the reply." },
+    });
+
+    const result = parseToolCalls(`Here is my review.\n${block}`, commentTools);
+
+    assert.ok(result, "expected the block to parse");
+    assert.equal(result.content, "Here is my review.");
+    assert.equal(result.toolCalls.length, 1);
+    assert.equal(
+      result.toolCalls[0].function.arguments,
+      JSON.stringify({ body: "Stray </tool_call> tag in the reply." })
+    );
+  });
+
+  it("ignores opening tags and braces inside a string argument", () => {
+    const commentTools = new Set(["post_comment"]);
+    const body = "Use <tool_call> and {braces} like } this {";
+    const block = toolCallBlock({ name: "post_comment", arguments: { body } });
+
+    const result = parseToolCalls(block, commentTools);
+
+    assert.ok(result, "expected the block to parse");
+    assert.equal(result.content, null);
+    assert.deepEqual(JSON.parse(result.toolCalls[0].function.arguments), { body });
+  });
+
+  it("handles escaped quotes and backslashes inside strings", () => {
+    const args = { path: 'C:\\temp\\', quote: 'Say "hi" then }', tail: 'a\\"}' };
+    const result = parseToolCalls(toolCallBlock({ name: "get_weather", arguments: args }), TOOL_NAMES);
+
+    assert.ok(result, "expected the block to parse");
+    assert.equal(result.toolCalls.length, 1);
+    assert.deepEqual(JSON.parse(result.toolCalls[0].function.arguments), args);
+  });
+
+  it("skips prose that mentions the opening tag and parses the real block after it", () => {
+    const text = [
+      "Emit <tool_call> blocks only when you call a tool.",
+      toolCallBlock({ name: "get_weather", arguments: { city: "Paris" } }),
+    ].join("\n");
+
+    const result = parseToolCalls(text, TOOL_NAMES);
+
+    assert.ok(result, "expected the real block to parse");
+    assert.equal(result.content, "Emit <tool_call> blocks only when you call a tool.");
+    assert.equal(result.toolCalls.length, 1);
+    assert.equal(result.toolCalls[0].function.arguments, '{"city":"Paris"}');
+  });
+
+  it("returns null when the reply only mentions the opening tag in prose", () => {
+    assert.equal(
+      parseToolCalls("You write <tool_call> tags around JSON. Never mind.", TOOL_NAMES),
+      null
+    );
+  });
+
+  it("returns null for the whole reply when a later block has unbalanced braces", (t) => {
+    t.mock.method(console, "warn", () => {});
+    const text = [
+      toolCallBlock({ name: "get_weather", arguments: { city: "Paris" } }),
+      '<tool_call>\n{"name": "get_weather", "arguments": {\n</tool_call>',
+    ].join("\n");
+
+    assert.equal(parseToolCalls(text, TOOL_NAMES), null);
+  });
+
+  it("returns null when the JSON object is never closed", (t) => {
+    t.mock.method(console, "warn", () => {});
+    const text = '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Paris"}\n';
+
+    assert.equal(parseToolCalls(text, TOOL_NAMES), null);
+  });
+
+  it("returns null when the closing tag is missing after the JSON", (t) => {
+    t.mock.method(console, "warn", () => {});
+    const text = '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Paris"}}\n';
+
+    assert.equal(parseToolCalls(text, TOOL_NAMES), null);
+  });
 });
 
 describe("buildSystemPrompt", () => {
