@@ -3,8 +3,13 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { after, afterEach, before, describe, it } from "node:test";
-import { ClaudeSubprocess, defaultCliCwd, type SubprocessOptions } from "./manager.js";
+import { after, afterEach, before, beforeEach, describe, it } from "node:test";
+import {
+  ClaudeSubprocess,
+  defaultCliCwd,
+  resolveClaudeBin,
+  type SubprocessOptions,
+} from "./manager.js";
 
 const WINDOWS_ONLY = process.platform !== "win32";
 const WAIT_TIMEOUT_MS = 5_000;
@@ -317,6 +322,34 @@ describe("Windows process-tree termination", { skip: WINDOWS_ONLY }, () => {
   }
 });
 
+describe("CLI binary resolution", { skip: process.platform === "win32" }, () => {
+  let previousClaudeBin: string | undefined;
+
+  beforeEach(() => {
+    previousClaudeBin = process.env.CLAUDE_BIN;
+  });
+
+  afterEach(() => {
+    restoreEnvironmentVariable("CLAUDE_BIN", previousClaudeBin);
+  });
+
+  it("fails on win32 without CLAUDE_BIN and tells the operator to set it", () => {
+    delete process.env.CLAUDE_BIN;
+    assert.throws(() => resolveClaudeBin("win32"), /CLAUDE_BIN/);
+  });
+
+  it("returns CLAUDE_BIN on every platform when it is set", () => {
+    process.env.CLAUDE_BIN = "/custom/claude";
+    assert.equal(resolveClaudeBin("win32"), "/custom/claude");
+    assert.equal(resolveClaudeBin("darwin"), "/custom/claude");
+  });
+
+  it("resolves to the bare claude command off win32 without CLAUDE_BIN", () => {
+    delete process.env.CLAUDE_BIN;
+    assert.equal(resolveClaudeBin("darwin"), "claude");
+  });
+});
+
 describe("stdout tail and timeout handling without an error listener", () => {
   // Plain fixtures that run on every platform, so these checks do not depend
   // on the Windows-only process-tree suite.
@@ -429,6 +462,116 @@ describe("stdout tail and timeout handling without an error listener", () => {
       // No-op once the fixture has exited; stops it if an assertion failed first.
       subprocess.kill();
     }
+  });
+});
+
+describe("stdout decoding and early CLI exit", () => {
+  // Plain fixtures again, so these run on every platform.
+  const SPLIT_RESULT_TEXT = "é🙂";
+  const LARGE_PROMPT_BYTES = 8 * 1024 * 1024;
+  let fixtureDir: string;
+  let utf8SplitPath: string;
+  let earlyExitPath: string;
+  let previousClaudeBin: string | undefined;
+
+  before(async () => {
+    previousClaudeBin = process.env.CLAUDE_BIN;
+    fixtureDir = await mkdtemp(path.join(tmpdir(), "claude-decode-"));
+    utf8SplitPath = path.join(fixtureDir, "utf8-split.cjs");
+    earlyExitPath = path.join(fixtureDir, "early-exit.cjs");
+    await writeFile(
+      utf8SplitPath,
+      [
+        "process.stdin.resume();",
+        'process.stdin.on("end", () => {',
+        `  const line = JSON.stringify({type:"result",subtype:"success",is_error:false,result:${JSON.stringify(SPLIT_RESULT_TEXT)},session_id:"s",duration_ms:1,duration_api_ms:1,num_turns:1,total_cost_usd:0,usage:{input_tokens:1,output_tokens:1}}) + "\\n";`,
+        '  const buf = Buffer.from(line, "utf8");',
+        // Cut two bytes into the 4-byte emoji, so its bytes arrive in two chunks.
+        '  const cut = buf.indexOf(Buffer.from("🙂", "utf8")) + 2;',
+        "  process.stdout.write(buf.subarray(0, cut));",
+        "  setTimeout(() => process.stdout.write(buf.subarray(cut)), 50);",
+        "});",
+      ].join("\n"),
+      "utf8"
+    );
+    await writeFile(earlyExitPath, "process.exit(1);\n", "utf8");
+
+    process.env.CLAUDE_BIN = process.execPath;
+  });
+
+  after(async () => {
+    restoreEnvironmentVariable("CLAUDE_BIN", previousClaudeBin);
+    await rm(fixtureDir, { recursive: true, force: true });
+  });
+
+  it("decodes a multi-byte character split across stdout chunks and emits no raw line", async () => {
+    const subprocess = new ClaudeSubprocess();
+    const testable = subprocess as unknown as {
+      buildArgs: (options: SubprocessOptions) => string[];
+    };
+    const buildRealArgs = testable.buildArgs.bind(subprocess);
+    testable.buildArgs = (options) => [utf8SplitPath, ...buildRealArgs(options)];
+
+    const events: string[] = [];
+    let resultText: unknown;
+    const rawLines: string[] = [];
+    subprocess.on("result", (result: { result?: unknown }) => {
+      events.push("result");
+      resultText = result.result;
+    });
+    subprocess.on("raw", (line: string) => {
+      rawLines.push(line);
+    });
+    subprocess.on("error", () => {
+      events.push("error");
+    });
+    const closed = new Promise<void>((resolve) =>
+      subprocess.once("close", () => {
+        events.push("close");
+        resolve();
+      })
+    );
+
+    await subprocess.start("hello", {
+      model: "claude-haiku-4-5",
+      timeout: GENEROUS_REQUEST_TIMEOUT_MS,
+    });
+    await withTimeout(closed, "split UTF-8 fixture did not close");
+
+    assert.deepEqual(events, ["result", "close"]);
+    assert.equal(resultText, SPLIT_RESULT_TEXT);
+    assert.deepEqual(rawLines, [], "valid JSON must not be emitted as raw");
+  });
+
+  it("emits close without crashing when the CLI exits before reading a large prompt", async () => {
+    const subprocess = new ClaudeSubprocess();
+    const testable = subprocess as unknown as {
+      buildArgs: (options: SubprocessOptions) => string[];
+    };
+    const buildRealArgs = testable.buildArgs.bind(subprocess);
+    testable.buildArgs = (options) => [earlyExitPath, ...buildRealArgs(options)];
+
+    const events: string[] = [];
+    subprocess.on("error", () => {
+      events.push("error");
+    });
+    const closed = new Promise<number | null>((resolve) =>
+      subprocess.once("close", (code: number | null) => {
+        events.push("close");
+        resolve(code);
+      })
+    );
+
+    // The fixture never reads stdin, so writing this prompt hits EPIPE.
+    // The stdin error listener must absorb it; an unhandled error would crash the runner.
+    await subprocess.start("x".repeat(LARGE_PROMPT_BYTES), {
+      model: "claude-haiku-4-5",
+      timeout: GENEROUS_REQUEST_TIMEOUT_MS,
+    });
+    const code = await withTimeout(closed, "early-exiting CLI did not emit close");
+
+    assert.ok(events.includes("close"));
+    assert.equal(code, 1);
   });
 });
 

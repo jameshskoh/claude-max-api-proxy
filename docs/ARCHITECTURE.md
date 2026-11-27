@@ -59,7 +59,8 @@ Runtime flows are in [WORKFLOW.md](WORKFLOW.md), and the reasons for design choi
 - `CLAUDE_BIN` selects the CLI binary.
 - `DEBUG` logs requests and body prefixes. `DEBUG_SUBPROCESS` logs spawn arguments, prompt prefixes and stdout sizes. Separately, every chat-completion request writes one summary line when it finishes. No flag turns it on or off (see [WORKFLOW.md](WORKFLOW.md#dev-loop)).
 - Startup checks that the CLI runs. The auth check is a no-op.
-- Windows: resolves the bundled `claude.exe` behind the npm shim and kills the whole process tree. See [resolve-windows-exe-and-kill-process-tree](adrs/resolve-windows-exe-and-kill-process-tree.md).
+- Ctrl+C or SIGTERM stops the server. Idle connections close at once and open streams get 5 seconds; after that the process exits with code 1. A second signal exits at once. See [WORKFLOW.md](WORKFLOW.md#dev-loop).
+- Windows: resolves the bundled `claude.exe` behind the npm shim and kills the whole process tree. If the `.exe` cannot be found, the proxy fails with an error that names `CLAUDE_BIN`; it never runs the shim through a shell. See [resolve-windows-exe-and-kill-process-tree](adrs/resolve-windows-exe-and-kill-process-tree.md).
 - A 15-minute timeout per request. LaunchAgent setup is in [WORKFLOW.md](WORKFLOW.md#running-as-a-macos-launchagent).
 
 **Accepted but ignored**
@@ -136,7 +137,7 @@ This table is the one place that maps components to files. The rest of the docs 
 
 | Component | File | Responsibility |
 |---|---|---|
-| Standalone entry | `src/server/standalone.ts` | What runs. Parses the port, runs the startup checks, starts the server, handles SIGINT and SIGTERM. |
+| Standalone entry | `src/server/standalone.ts` | What runs. Parses the port, runs the startup checks, starts the server, and handles SIGINT and SIGTERM as a bounded shutdown. |
 | Library entry | `src/index.ts` | Re-exports the HTTP server and CLI helpers for use as a library. |
 | HTTP app | `src/server/index.ts` | Express app: Host check, body parsing, debug log, routing, 404, error handler, listen and stop. |
 | Request handlers | `src/server/routes.ts` | Chat completions (validation, model check, session resolution, streaming and non-streaming paths, and tool-call handling when tools are active), models, health. Also decides when each chat-completion request has finished, for the summary line. |
@@ -144,10 +145,10 @@ This table is the one place that maps components to files. The rest of the docs 
 | Request adapter | `src/adapter/openai-to-cli.ts` | The supported-model list and its check, prompt flattening for user, assistant and tool messages, and the delta prompt. |
 | Tool protocol | `src/adapter/tools.ts` | Builds the system prompt (base line, system and developer text, tool catalog and calling protocol). Renders tool calls and tool results as text for the prompt. Parses tool-call blocks out of reply text. |
 | Response adapter | `src/adapter/cli-to-openai.ts` | Builds the non-streaming body (with `tool_calls` when present) and the streaming chunks: text deltas, the tool-call chunk and the done chunk. |
-| Subprocess manager | `src/subprocess/manager.ts` | Finds the CLI binary, builds arguments (the no-tools flags and the system prompt), spawns, parses stdout into events, times out and kills. Holds the startup checks. |
+| Subprocess manager | `src/subprocess/manager.ts` | Finds the CLI binary, builds arguments (the no-tools flags and the system prompt), spawns, parses stdout into events, keeps the tail of stderr, times out and kills. Holds the startup checks. |
 | Session store | `src/subprocess/session-store.ts` | In-memory `user` to CLI session map with TTL. |
 | Types | `src/types/` | OpenAI request and response shapes (including tools and tool calls), CLI stream-json message shapes and type guards. |
-| Tests | `src/**/*.test.ts` | An end-to-end test against the real CLI, Windows-only process-tree tests, a missing-binary spawn test, and unit tests for the model check. See [WORKFLOW.md](WORKFLOW.md#tests). |
+| Tests | `src/**/*.test.ts` | An end-to-end test against the real CLI, Windows-only process-tree tests, a missing-binary spawn test, and unit tests for the model check. Also the route tests for a CLI that exits without a result (`src/server/routes-exit.test.ts`), the shutdown tests (`src/server/stop.test.ts`), the stderr tests (`src/subprocess/manager-stderr.test.ts`), the CLI binary lookup and stdout/early-exit blocks in `src/subprocess/manager.test.ts`, and the bad-JSON test in `src/server/index.test.ts`. See [WORKFLOW.md](WORKFLOW.md#tests). |
 
 **Entry points**
 
@@ -193,7 +194,7 @@ Responses carry no CORS headers. A request whose Host is not a local name (local
 - `user`: session key.
 - Everything else is ignored, including the fields listed under "Accepted but ignored".
 
-Only `Content-Type: application/json` is parsed. Any other content type leaves `messages` undefined, so the response is the 400 above. The body limit is 10 MB.
+Only `Content-Type: application/json` is parsed. Any other content type leaves `messages` undefined, so the response is the 400 above. The body limit is 10 MB. A body that is not valid JSON gets `400` with code `invalid_json`; a body over the limit gets `413`.
 
 **Non-streaming response**
 
@@ -232,11 +233,11 @@ With active tools, no text reaches the client until the CLI run ends. After that
 - Validation: `400 {"error":{"message","type":"invalid_request_error","code":"invalid_messages"}}`.
 - Missing, non-string or unsupported `model`: `404 {"error":{"message","type":"invalid_request_error","param":"model","code":"model_not_found"}}`. The message lists the supported IDs. Checked after the messages check, so an empty `messages` gets the 400.
 - Anything thrown before streaming starts: `500`, `type: "server_error"`, `code: null`.
-- Non-streaming CLI error, timeout, early exit or failed spawn: `500 server_error`. A CLI result with `is_error` true is the same, with the CLI's message.
-- Malformed JSON, or a body over 10 MB: `500 server_error` with the parser message. These are not 400 or 413.
+- Non-streaming CLI error, timeout, early exit or failed spawn: `500 server_error`. A CLI result with `is_error` true is the same, with the CLI's message. An early exit names the exit code and, when the CLI wrote to stderr, appends the last stderr line (up to 300 characters).
+- Malformed JSON: `400 invalid_request_error` with code `invalid_json`, and a message that begins "Invalid JSON in request body". A body over 10 MB: `413 invalid_request_error`. Any other error that carries a 4xx status keeps it, as `invalid_request_error`. Other errors are `500 server_error`. If headers were already sent, the error is passed on to Express instead.
 - Streaming, error during the run or a failed spawn: a `data: {"error":{…}}` line, then the stream ends with no `[DONE]`.
 - Streaming, CLI result with `is_error` true: the same error line with the CLI's message, then `[DONE]`, then the stream ends.
-- Streaming, CLI exits with no result: an error line, then `[DONE]`.
+- Streaming, CLI exits with no result, at any exit code including 0: an error line reading `Claude CLI exited with code N without a result`, with the last stderr line appended when there is one, then `[DONE]`.
 
 ### Config surface
 
@@ -245,20 +246,20 @@ With active tools, no text reaches the client until the CLI run ends. After that
 | Port (first CLI argument) | 3456 | The only CLI argument. Not an env var. |
 | Host | `127.0.0.1` | Library callers of the server start function can pass a host. Nothing in the repo does, and there is no CLI or env option. Its value is also accepted in the Host check. |
 | `DEBUG` | off | Logs request lines and body prefixes (200 and 300 characters). |
-| `DEBUG_SUBPROCESS` | off | Logs CLI arguments (which include the system prompt), a 200-character prompt prefix, stdout sizes and stderr. |
+| `DEBUG_SUBPROCESS` | off | Logs CLI arguments (which include the system prompt), a 200-character prompt prefix, stdout sizes and each stderr chunk. A failed exit logs the stderr tail even when this is off. |
 | Request summary line | always on | One line per chat-completion request when it finishes. No setting turns it off. Format in [WORKFLOW.md](WORKFLOW.md#dev-loop). |
-| `CLAUDE_BIN` | `claude` | Not cached, so changes take effect at the next spawn. |
+| `CLAUDE_BIN` | `claude` (Windows: the bundled `claude.exe`) | Not cached, so changes take effect at the next spawn. Required on Windows when the `.exe` cannot be found. |
 | Request timeout | 15 min | The subprocess accepts a custom timeout, but no caller passes one. |
 | Session TTL | 6 h idle | |
 | Session prune | every 30 min | The timer is `unref`'d. |
-| Body limit | 10 MB | |
+| Body limit | 10 MB | A larger body gets 413. |
 | `CLAUDECODE` | stripped | Removed from the CLI's environment. |
 
 None of these can be set per request.
 
 ### Outbound to the CLI
 
-**Spawn.** One child per request, run in a fixed folder under the OS temp directory (created if missing) rather than the proxy's own directory, so the CLI does not load the repo's project context. The child gets the proxy's environment minus `CLAUDECODE`, piped stdio, and no shell. A shell is used only by the Windows shim fallback.
+**Spawn.** One child per request, run in a fixed folder under the OS temp directory (created if missing) rather than the proxy's own directory, so the CLI does not load the repo's project context. The child gets the proxy's environment minus `CLAUDECODE`, and piped stdio. The CLI is never run through a shell, on any platform. On Windows the binary is the `.exe` behind the npm shim; if it cannot be found, the request fails instead of falling back to the shim.
 
 **Arguments**, in order:
 
@@ -282,9 +283,11 @@ The session flag has three branches:
 - `user` with no stored session → `--session-id <new UUID>`. First turn for that `user`.
 - No `user` → `--no-session-persistence`.
 
-**Stdin.** The prompt is written as plain text, then stdin is closed. There is no `--input-format` flag. The `user_message` JSON idea in old `PROTOCOL.md` was never used. The system prompt is not on stdin; see the sharp edges.
+**Stdin.** The prompt is written as plain text, then stdin is closed. If the CLI exits before reading it, the write error is ignored and the exit code decides the reply. There is no `--input-format` flag. The `user_message` JSON idea in old `PROTOCOL.md` was never used. The system prompt is not on stdin; see the sharp edges.
 
-**Stdout.** Newline-delimited JSON, split into lines and parsed one by one. Non-JSON lines are emitted as `raw`, and nothing listens to them. Stderr is logged only under `DEBUG_SUBPROCESS` and never fails a request. A non-zero exit with no result is an error.
+**Stdout.** Newline-delimited JSON, decoded as UTF-8 across chunk boundaries, split into lines and parsed one by one. Non-JSON lines are emitted as `raw`, and nothing listens to them. An exception thrown by an event listener is logged, and parsing carries on.
+
+**Stderr.** The last 2 KB is kept. Each chunk is logged only under `DEBUG_SUBPROCESS`. The tail is always logged when the CLI exits non-zero or without a result, and its last line goes into the client's error message. Stderr never fails a request by itself. A non-zero exit with no result is an error.
 
 ### CLI output message types
 
@@ -355,8 +358,9 @@ Items marked **inferred** come from reading the code. They have not been run.
 - **The session map is lost on restart.** It lives in process memory. The next turn starts a new CLI session with the full history. The CLI's own transcripts stay on disk.
 - **Aborted requests log no usage.** A request whose client disconnects is logged as `aborted` at the disconnect, with no token counts, so the usage of a run that was killed is not recorded.
 - **On macOS and Linux, kill signals only the direct child.** Descendants are not reached. Timeouts and client disconnects both use this path. Windows uses `taskkill /T`.
-- **Listener exceptions are swallowed.** Stdout parsing wraps event emission in the same `try` as the JSON parse. A throw in a request-handler listener becomes a `raw` event that nothing listens to, so the failure is silent. **Inferred.**
+- **Listener exceptions are logged.** A throw in an event listener is written to the terminal, and the next stdout line is still parsed. The request can still end with a missing or partial reply, so check the terminal log when one looks wrong.
 - **The auth check always passes.** A logged-out CLI shows up on the first request, not at startup.
-- **Malformed JSON and oversized bodies return 500.** They go to the generic error handler, so the client gets `500 server_error`, not 400 or 413.
+- **Windows lookup depends on the shim's text.** If npm changes the shim layout, the startup check and every request fail until `CLAUDE_BIN` is set. A successful lookup is cached for the life of the process, so a CLI upgrade that moves the `.exe` needs a restart.
+- **Shutdown cuts long streams.** After 5 seconds, Ctrl+C ends any open streams and exits with code 1.
 - **Dead code.** The response adapter has an unused per-message chunk converter. The CLI types have an unused init-message guard. The subprocess manager has an unused is-running check and an unused typed events interface. Its tool events (`tool_use_start`, `input_json_delta`, `content_block_stop`) have no listeners and do not fire while the CLI has no tools.
 - **Stale naming.** The session store's header comment calls the key a "Hermes conversation key". It is just the request's `user` field.

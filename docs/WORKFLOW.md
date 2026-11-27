@@ -11,19 +11,21 @@ This page traces what happens at runtime: startup, each request, the CLI child p
 flowchart TD
   A["Standalone entry starts"] --> B["Parse port from the first argument, default 3456"]
   B -->|invalid| X1["Print error, exit 1"]
-  B -->|valid| C["CLI check runs claude --version"]
+  B -->|valid| C["CLI check finds the binary, then runs claude --version"]
   C -->|error or non-zero exit| X2["Print error, exit 1"]
   C -->|ok| D["Auth check, always ok"]
   D --> E["Start the HTTP app on 127.0.0.1"]
   E -->|EADDRINUSE or other error| X3["Print error, exit 1"]
   E -->|listening| F["Serving requests"]
-  F -->|SIGINT or SIGTERM| G["Stop the server, then exit 0"]
+  F -->|SIGINT or SIGTERM| G["Close idle connections, wait for open ones, then exit 0"]
+  G -->|still open after 5 s, or stop fails| X4["Print error, exit 1"]
+  G -->|another SIGINT or SIGTERM| X5["Exit 1 at once"]
 ```
 
 **Notes**
 
 - `npm start` runs the standalone server. The optional LaunchAgent (see section 7) can run the same server. Only the CLI check can stop startup. The auth check never fails, so a CLI that is not logged in still starts. Errors show up on the first real request.
-- Stopping the server closes the listener and waits for open connections. An in-flight streaming response delays exit (inferred, not tested).
+- Stopping closes the listener and idle keep-alive connections, then waits for open ones. An open stream can hold the process for up to 5 seconds. After that the process exits with code 1 and the stream is cut. A second Ctrl+C or SIGTERM exits at once with code 1, and a stop error is logged and also exits 1.
 - Shutdown does not signal CLI children itself. Run by hand, a running `claude` can outlive the server. Under launchd, stopping the job also kills the rest of its process group unless the plist sets `AbandonProcessGroup`, so children are normally cleaned up (inferred, not tested).
 
 ## 2. Request pipeline
@@ -31,7 +33,7 @@ flowchart TD
 Each HTTP request passes these steps in order.
 
 1. **Host check** (HTTP app). A request whose Host is not a local name (localhost, `127.0.0.1`, `::1`, or the bind host) gets **403** with error code `forbidden_host`. Nothing after this step runs for it.
-2. **Body parsing** (HTTP app). Bodies whose `Content-Type` is `application/json` are buffered raw (10 MB limit) and then parsed with `JSON.parse`. A parse failure goes to the error handler, which returns **500**, not 400.
+2. **Body parsing** (HTTP app). Bodies whose `Content-Type` is `application/json` are buffered raw (10 MB limit) and then parsed with `JSON.parse`. A body that is not valid JSON gets **400** with error code `invalid_json`. A body over 10 MB gets **413**, as `invalid_request_error`.
 3. **Debug log.** Prints method and path when `DEBUG` is set.
 4. **Routing**: `GET /health`, `GET /v1/models`, `POST /v1/chat/completions`. Anything else gets a JSON 404.
 5. **Chat completions handler** (request handlers). Makes a 24-character request ID. Streaming is on only when `stream` is exactly `true`.
@@ -58,11 +60,11 @@ The subprocess manager wraps one CLI child and reports what it does as events. I
    - `--resume <id>` when resuming;
    - `--session-id <id>` for a new keyed session;
    - `--no-session-persistence` when the request has no `user`.
-3. **Spawn.** Runs in a fixed folder under the OS temp directory, created if missing, so the CLI does not load the repo's project context. The environment is the parent's minus `CLAUDECODE`, with piped stdio. No shell on macOS and Linux. The binary is `CLAUDE_BIN` if set, otherwise `claude` from PATH. On Windows it resolves to the bundled `.exe`. See [resolve-windows-exe-and-kill-process-tree](adrs/resolve-windows-exe-and-kill-process-tree.md).
+3. **Spawn.** Runs in a fixed folder under the OS temp directory, created if missing, so the CLI does not load the repo's project context. The environment is the parent's minus `CLAUDECODE`, with piped stdio. Never through a shell, on any platform. The binary is `CLAUDE_BIN` if set, otherwise `claude` from PATH on macOS and Linux, and on Windows the bundled `claude.exe` behind the npm shim. If that `.exe` cannot be found, the start fails with a message that tells the operator to set `CLAUDE_BIN`; the shim is not run through a shell instead. A successful lookup is cached; a failure is retried on the next request. See [resolve-windows-exe-and-kill-process-tree](adrs/resolve-windows-exe-and-kill-process-tree.md).
 4. **Arm timeout.** 15 minutes by default. The request handlers never pass a custom timeout.
-5. **Prompt on stdin.** The user prompt is written and stdin is closed. Sending it on stdin avoids `E2BIG` on large inputs. The system prompt goes on the command line instead, so it does not get the same protection.
-6. **stdout.** Chunks are appended to a buffer, split on newlines, and the last partial line is kept for the next chunk. Each line is trimmed and parsed as JSON. Lines that do not parse are emitted as `raw`.
-7. **stderr.** Logged only when `DEBUG_SUBPROCESS` is set. Never emitted as an event.
+5. **Prompt on stdin.** The user prompt is written and stdin is closed. Sending it on stdin avoids `E2BIG` on large inputs. The system prompt goes on the command line instead, so it does not get the same protection. A write error on stdin, such as the CLI exiting before it reads the prompt, is ignored; the exit code decides the reply.
+6. **stdout.** Chunks are decoded as UTF-8 across chunk boundaries, so a multi-byte character split between two chunks stays intact. They are appended to a buffer, split on newlines, and the last partial line is kept for the next chunk. Each line is trimmed and parsed as JSON. Lines that do not parse are emitted as `raw`.
+7. **stderr.** Each chunk is logged only when `DEBUG_SUBPROCESS` is set. The last 2 KB is kept, and the tail is always logged when the CLI exits non-zero or without a result. Stderr is never emitted as an event and never fails a request by itself.
 8. **Exit.** Clears the timer, parses any leftover buffer (a last line with no trailing newline is parsed too), and emits `close` with the exit code.
 9. **Resolve.** Start resolves right after the spawn call returns, before the process has done anything. A spawn failure is reported later, as an `error` event (see the spawn failure note).
 
@@ -86,7 +88,7 @@ The subprocess manager wraps one CLI child and reports what it does as events. I
 
 - Text deltas are matched before full assistant messages, so a text delta never reaches the `assistant` branch.
 - `error` is emitted by the timeout and by a failed spawn. Other child failures reach the request handlers through `close`. See the spawn failure note below.
-- The `try` around JSON parsing also wraps the event emission. An exception thrown by a listener is caught there and reported as `raw`. If a handler looks silent, check the `raw` lines (inferred from code).
+- An exception thrown by a listener is logged to the terminal as a listener error, and parsing moves on to the next line. A handler that looks silent is worth checking in that log.
 
 **Spawn failure (missing CLI)**
 
@@ -97,7 +99,7 @@ A spawn failure, such as a missing CLI binary, is emitted as the subprocess's `e
 
 Both were checked on a live server with the CLI path pointed at a missing binary.
 
-If starting throws before the process exists, the start call rejects instead. The streaming path then writes the same error line and ends the stream. Headers are already sent by then, so the status cannot change. The startup CLI check normally catches a missing CLI before any request arrives (inferred from code, not run).
+If starting throws before the process exists, the start call rejects instead. This is how a Windows lookup failure arrives, so its message names `CLAUDE_BIN`. Non-streaming returns 500 with that message. The streaming path writes the same error line and ends the stream. Headers are already sent by then, so the status cannot change. The startup CLI check normally catches a missing CLI before any request arrives (inferred from code, not run).
 
 ## 4. Response flows
 
@@ -122,7 +124,7 @@ sequenceDiagram
     R-->>C: 200 JSON built from the result, model is the requested ID, or 500 when the result has is_error
   else no result
     R->>R: clear the session if resuming
-    R-->>C: 500 exited without response
+    R-->>C: 500 with the exit message and the last stderr line, if any
   end
   Note over S,R: error event (timeout or failed spawn) clears the session if resuming and sends 500
   Note over R: at most one reply is written, and none once the client has left
@@ -181,8 +183,7 @@ data: [DONE]
 **Branches**
 
 - **Client disconnects before completion**: the response's `close` event kills the subprocess. The handler listens on the response rather than the request, because the request's `close` fires as soon as the body is read.
-- **Child exits non-zero with no result**: clears the session if resuming, writes an error line `Process exited with code <n>`, then `[DONE]`, then ends. A null code (killed by signal) also takes this path.
-- **Child exits 0 with no result**: writes `[DONE]` and ends, with no error line (inferred from code).
+- **Child exits with no result**, at any code: clears the session if resuming, unless the code is 0. Writes an error line reading `Claude CLI exited with code <n> without a result`, with the last stderr line appended when there is one, then `[DONE]`, then ends. A null code (killed by signal) also takes this path.
 - **Error result** (`is_error` true): saves the session if keyed, writes an error line with the CLI's message, then `[DONE]`, then ends. No usage or done chunk is sent. Logged as `finish=error`.
 - **Timeout error**: clears the session if resuming, writes an error line, ends. No `[DONE]`.
 - **Spawn failure** (missing CLI, or a start that throws): clears the session if resuming, writes one error line, ends. No `[DONE]`. Logged as `finish=error`.
@@ -227,7 +228,7 @@ stateDiagram-v2
 ## 6. Timeouts, disconnects, kill
 
 - **Timeout.** After 15 minutes, the subprocess manager sends SIGTERM through the kill path (the whole tree only on Windows) if the process is not already killed. It then emits `error` with `Request timed out after 900000ms`. The error listener sends the error reply and clears the session if resuming. If nothing listens for `error`, the timer still stops the process but emits nothing, so it cannot crash the process. The request handlers always listen.
-- **Streaming disconnect.** The response's `close` event kills the subprocess. The child exits with a null code and the close listener runs its failure branch. Nothing else happens; the request is not retried.
+- **Streaming disconnect.** The response's `close` event kills the subprocess. The child exits with a null code and the close listener runs its failure branch. Nothing is sent to the client, and the request is not retried.
 - **Non-streaming disconnect.** Before the reply is written, the response's `close` event kills the subprocess and the summary line is written as `aborted`. A result that arrives after that is dropped, and a resumed session is cleared. The kill and the `aborted` line were checked on a live server; the late-result case is inferred from code.
 - **Kill, Windows.** `taskkill /PID <pid> /T /F` removes the whole process tree. If taskkill fails, the code signals only the root process and reports the kill as not done, so the caller can retry.
 - **Kill, macOS and Linux.** Signals only the direct child. Processes the CLI started can survive (a code comment says so). With the CLI's tools turned off, there are few such processes to start.
@@ -244,6 +245,8 @@ npm run dev                            # tsc --watch; restart the server yoursel
 npm start                              # node dist/server/standalone.js on port 3456
 node dist/server/standalone.js 3457    # custom port, 1 to 65535
 ```
+
+**Stopping.** Ctrl+C closes idle connections and waits for open streams. If they are still open after 5 seconds, the process exits with code 1. A second Ctrl+C exits at once with code 1. Otherwise it exits with code 0.
 
 Manual checks. These call the real CLI and use subscription quota. `claude-haiku-4-5` keeps cost down:
 
@@ -279,8 +282,8 @@ The fields, in order: the request ID (the same ID as the `X-Request-Id` header o
 **Environment variables**
 
 - `DEBUG`: one line per request, the first 200 characters of each body, and the first 300 characters on a parse error. Without `DEBUG`, a parse error logs only length, method and URL.
-- `DEBUG_SUBPROCESS`: CLI args (including the system prompt) and the first 200 characters of the prompt, the child PID, stdout byte counts, the first 200 characters of stderr, and the exit code.
-- `CLAUDE_BIN`: runs this binary instead of `claude`. Useful for pointing at a fake CLI.
+- `DEBUG_SUBPROCESS`: CLI args (including the system prompt) and the first 200 characters of the prompt, the child PID, stdout byte counts, the first 200 characters of each stderr chunk, and the exit code. A failed exit logs the stderr tail even when this is off.
+- `CLAUDE_BIN`: runs this binary instead of `claude`. Useful for pointing at a fake CLI. On Windows, set it to the full path of `claude.exe` when the proxy cannot find it behind the npm shim.
 - `CLAUDECODE` is always removed from the child environment.
 
 Both debug flags log prompt fragments, so keep them off in normal use.
@@ -290,6 +293,12 @@ Both debug flags log prompt fragments, so keep them off in normal use.
 - `npm test` runs `node --test dist/**/*.test.js`. Build first (`npm run build`), because the tests run from `dist/`.
 - **End-to-end test.** Starts the real server on a random port and calls the real CLI with `claude-haiku-4-5`. It prints a quota warning when it starts and allows 120 seconds per test. **It uses subscription quota.** Run it with `node --test dist/e2e.test.js`.
 - **Subprocess manager tests.** Windows process-tree termination, which is skipped on other platforms. A missing-binary test runs everywhere and checks that a spawn failure emits `error`, then `close`.
+- **CLI binary lookup tests.** They pass the platform in, so the Windows failure path (no `CLAUDE_BIN`, and the message that names it) and the `CLAUDE_BIN` override are checked on macOS and Linux too. The block is skipped when the host itself is Windows.
+- **Stdout and early-exit tests.** Run everywhere. They cover a multi-byte character split across chunks, and a CLI that exits before reading its prompt.
+- **Stderr tests.** Cover the kept tail, the last-line helper, a listener that throws, and a failed exit that reports the stderr line.
+- **Exit-without-result route tests.** A streamed error line with the stderr line, then `[DONE]`, and a non-streaming 500 with it.
+- **Shutdown test.** Stopping resolves promptly when only an idle keep-alive connection is open.
+- **HTTP bad-JSON test.** Malformed JSON gets 400 `invalid_json`.
 - **Request adapter test.** Unit tests for the model check (prefix stripping, unsupported IDs). It needs no CLI and no quota. Run it with `node --test dist/adapter/openai-to-cli.test.js`.
 - **Glob caveat.** npm runs scripts with `sh`, where `**` without globstar acts like `*`. So `dist/**/*.test.js` matches test files one folder down but not the top-level `dist/e2e.test.js`, and `npm test` does not run the e2e test. Checked with `sh` in a scratch folder.
 

@@ -51,57 +51,56 @@ export interface SubprocessEvents {
 const DEFAULT_TIMEOUT = 900000; // 15 minutes
 
 /**
- * Resolve the real Claude CLI binary to spawn.
+ * Resolve the real Claude CLI binary to spawn. The result is always spawned
+ * directly, never through a shell.
  *
  * On Windows, the global `claude` command is an npm shim (`claude.cmd`) that
- * just execs a bundled `claude.exe`. Running the shim requires `shell: true`,
- * which routes our argv through cmd.exe — and cmd.exe treats characters our
- * system prompt legitimately contains (`<`, `>`, `(`, `)`, `&`) as
- * redirection/grouping/chaining operators, corrupting the argument list that
- * follows (notably `--session-id`/`--resume`, which silently stop working).
- * Resolving straight to the `.exe` lets us spawn with `shell: false` and
- * skip cmd.exe entirely. Falls back to the shim (with shell:true) if the
- * `.exe` can't be located.
+ * just execs a bundled `claude.exe`. Running the shim requires a shell, and a
+ * shell routes our argv through cmd.exe. cmd.exe treats characters our system
+ * prompt legitimately contains (`<`, `>`, `(`, `)`, `&`) as redirection,
+ * grouping and chaining operators. That corrupts the argument list (notably
+ * the session flags, which silently stop working) and lets request-derived
+ * text inject commands. So on Windows we resolve straight to the `.exe` behind
+ * the shim. If it cannot be located, resolution fails rather than falling back
+ * to the shim; the operator must set CLAUDE_BIN to the full path of claude.exe.
  */
-let resolvedClaudeBin: { bin: string; shell: boolean } | null = null;
+let resolvedClaudeBin: string | null = null;
 
-function resolveClaudeBin(): { bin: string; shell: boolean } {
+export function resolveClaudeBin(platform: NodeJS.Platform = process.platform): string {
   if (process.env.CLAUDE_BIN) {
     // Environment overrides are intentionally not cached. This lets callers
     // temporarily select a binary without contaminating later resolutions.
-    return { bin: process.env.CLAUDE_BIN, shell: false };
+    return process.env.CLAUDE_BIN;
   }
+
+  if (platform !== "win32") return "claude";
 
   if (resolvedClaudeBin) return resolvedClaudeBin;
 
-  if (process.platform === "win32") {
-    try {
-      const where = spawnSync("where.exe", ["claude"], { encoding: "utf8" });
-      const shimPath = (where.stdout || "")
-        .split(/\r?\n/)
-        .map((p) => p.trim())
-        .find((p) => p.toLowerCase().endsWith(".cmd"));
+  try {
+    const where = spawnSync("where.exe", ["claude"], { encoding: "utf8" });
+    const shimPath = (where.stdout || "")
+      .split(/\r?\n/)
+      .map((p) => p.trim())
+      .find((p) => p.toLowerCase().endsWith(".cmd"));
 
-      if (shimPath) {
-        const shimDir = path.dirname(shimPath);
-        const shimContent = readFileSync(shimPath, "utf8");
-        const match = shimContent.match(/"%dp0%\\(.+?\.exe)"/i);
-        if (match) {
-          const exePath = path.join(shimDir, match[1]);
-          resolvedClaudeBin = { bin: exePath, shell: false };
-          return resolvedClaudeBin;
-        }
+    if (shimPath) {
+      const shimDir = path.dirname(shimPath);
+      const shimContent = readFileSync(shimPath, "utf8");
+      const match = shimContent.match(/"%dp0%\\(.+?\.exe)"/i);
+      if (match) {
+        // Only a successful resolution is cached; failures are retried next time.
+        resolvedClaudeBin = path.join(shimDir, match[1]);
+        return resolvedClaudeBin;
       }
-    } catch {
-      // Fall through to shim fallback below
     }
-
-    resolvedClaudeBin = { bin: "claude", shell: true };
-    return resolvedClaudeBin;
+  } catch {
+    // Fall through to the error below
   }
 
-  resolvedClaudeBin = { bin: "claude", shell: false };
-  return resolvedClaudeBin;
+  throw new Error(
+    'Could not find claude.exe behind the npm "claude" shim. Set CLAUDE_BIN to the full path of claude.exe.'
+  );
 }
 
 /**
@@ -170,6 +169,10 @@ export class ClaudeSubprocess extends EventEmitter {
   private buffer: string = "";
   private timeoutId: NodeJS.Timeout | null = null;
   private isKilled: boolean = false;
+  /** Last ~2 KB of the CLI's stderr, kept for diagnostics */
+  private stderrTail: string = "";
+  /** Set once a result message has been parsed from stdout */
+  private sawResult: boolean = false;
 
   /**
    * Start the Claude CLI subprocess with the given prompt
@@ -184,16 +187,21 @@ export class ClaudeSubprocess extends EventEmitter {
 
     return new Promise((resolve, reject) => {
       try {
-        // Use spawn() for security - no shell interpretation
-        const { bin, shell } = resolveClaudeBin();
+        // Use spawn() for security - no shell interpretation. A resolution
+        // failure throws here and becomes a rejection of start().
+        const bin = resolveClaudeBin();
         this.process = spawn(bin, args, {
           cwd: options.cwd || defaultCliCwd(),
           env: Object.fromEntries(
             Object.entries(process.env).filter(([k]) => k !== "CLAUDECODE")
           ),
           stdio: ["pipe", "pipe", "pipe"],
-          shell,
         });
+
+        // Decode as UTF-8 across chunk boundaries so a multi-byte character
+        // split between two chunks is not corrupted.
+        this.process.stdout?.setEncoding("utf8");
+        this.process.stderr?.setEncoding("utf8");
 
         this.armTimeout(timeout);
 
@@ -213,6 +221,15 @@ export class ClaudeSubprocess extends EventEmitter {
           }
         });
 
+        // The CLI may exit before reading a large prompt, which raises EPIPE on
+        // stdin. Without a listener that would crash the proxy. The "close"
+        // event carries the exit code and drives the error reply.
+        this.process.stdin?.on("error", (err) => {
+          if (process.env.DEBUG_SUBPROCESS) {
+            console.error("[Subprocess] stdin error:", err.message);
+          }
+        });
+
         // Pass prompt via stdin to avoid E2BIG on large inputs
         this.process.stdin?.write(prompt);
         this.process.stdin?.end();
@@ -222,18 +239,18 @@ export class ClaudeSubprocess extends EventEmitter {
         }
 
         // Parse JSON stream from stdout
-        this.process.stdout?.on("data", (chunk: Buffer) => {
-          const data = chunk.toString();
+        this.process.stdout?.on("data", (chunk: string) => {
           if (process.env.DEBUG_SUBPROCESS) {
-            console.error(`[Subprocess] Received ${data.length} bytes of stdout`);
+            console.error(`[Subprocess] Received ${chunk.length} bytes of stdout`);
           }
-          this.buffer += data;
+          this.buffer += chunk;
           this.processBuffer();
         });
 
         // Capture stderr for debugging
-        this.process.stderr?.on("data", (chunk: Buffer) => {
-          const errorText = chunk.toString().trim();
+        this.process.stderr?.on("data", (chunk: string) => {
+          this.stderrTail = (this.stderrTail + chunk).slice(-2048);
+          const errorText = chunk.trim();
           if (errorText) {
             // Don't emit as error unless it's actually an error
             // Claude CLI may write debug info to stderr
@@ -254,6 +271,13 @@ export class ClaudeSubprocess extends EventEmitter {
           if (this.buffer.trim()) {
             this.buffer += "\n";
             this.processBuffer();
+          }
+          // Surface the CLI's stderr when it failed or never produced a result,
+          // since that is the only clue to why
+          if ((code !== 0 || !this.sawResult) && this.stderrTail.trim()) {
+            console.error(
+              `[Subprocess] CLI stderr (exit code ${code}):\n${this.stderrTail.trim()}`
+            );
           }
           this.emit("close", code);
         });
@@ -318,8 +342,17 @@ export class ClaudeSubprocess extends EventEmitter {
       const trimmed = line.trim();
       if (!trimmed) continue;
 
+      let message: ClaudeCliMessage;
       try {
-        const message: ClaudeCliMessage = JSON.parse(trimmed);
+        message = JSON.parse(trimmed);
+      } catch {
+        // Non-JSON output, emit as raw
+        this.emit("raw", trimmed);
+        continue;
+      }
+
+      // A throwing listener must not abort parsing of the rest of the stream
+      try {
         this.emit("message", message);
 
         if (isTextBlockStart(message)) {
@@ -345,11 +378,11 @@ export class ClaudeSubprocess extends EventEmitter {
         } else if (isAssistantMessage(message)) {
           this.emit("assistant", message);
         } else if (isResultMessage(message)) {
+          this.sawResult = true;
           this.emit("result", message);
         }
-      } catch {
-        // Non-JSON output, emit as raw
-        this.emit("raw", trimmed);
+      } catch (err) {
+        console.error("[Subprocess] Event listener threw:", err);
       }
     }
   }
@@ -399,6 +432,19 @@ export class ClaudeSubprocess extends EventEmitter {
   isRunning(): boolean {
     return this.process !== null && !this.isKilled && this.process.exitCode === null;
   }
+
+  /**
+   * Last non-empty line of the CLI's stderr tail, trimmed and cut to 300
+   * characters. Returns "" when stderr has produced no text.
+   */
+  stderrLastLine(): string {
+    const lines = this.stderrTail
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    const last = lines[lines.length - 1] ?? "";
+    return last.slice(0, 300);
+  }
 }
 
 /**
@@ -406,8 +452,14 @@ export class ClaudeSubprocess extends EventEmitter {
  */
 export async function verifyClaude(): Promise<{ ok: boolean; error?: string; version?: string }> {
   return new Promise((resolve) => {
-    const { bin, shell } = resolveClaudeBin();
-    const proc = spawn(bin, ["--version"], { stdio: "pipe", shell });
+    let bin: string;
+    try {
+      bin = resolveClaudeBin();
+    } catch (err) {
+      resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+    const proc = spawn(bin, ["--version"], { stdio: "pipe" });
     let output = "";
 
     proc.stdout?.on("data", (chunk: Buffer) => {

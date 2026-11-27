@@ -172,6 +172,15 @@ export async function handleChatCompletions(
 }
 
 /**
+ * Append the last line the CLI wrote to stderr, when it wrote any, so an
+ * error message says why the CLI stopped.
+ */
+function withCliStderr(message: string, subprocess: ClaudeSubprocess): string {
+  const line = subprocess.stderrLastLine();
+  return line ? `${message}: ${line}` : message;
+}
+
+/**
  * Handle streaming response (SSE)
  *
  * IMPORTANT: The Express req.on("close") event fires when the request body
@@ -368,23 +377,19 @@ async function handleStreamingResponse(
 
     subprocess.on("close", (code: number | null) => {
       if (!isComplete) {
-        summarize({
-          finish: "error",
-          error: `Process exited with code ${code} without result`,
-        });
-      }
-      // Subprocess exited - ensure response is closed
-      if (code !== 0 && !isComplete) {
-        if (sessionCtx.resume && sessionCtx.sessionKey) {
+        // Exit without a result - summarize and send an error for any exit code
+        const message = withCliStderr(`Claude CLI exited with code ${code} without a result`, subprocess);
+        summarize({ finish: "error", error: message });
+        if (code !== 0 && sessionCtx.resume && sessionCtx.sessionKey) {
           clearSession(sessionCtx.sessionKey);
         }
-        if (!res.writableEnded) {
-          // Abnormal exit without result - send error
+        if (!res.writableEnded && !res.destroyed) {
           res.write(`data: ${JSON.stringify({
-            error: { message: `Process exited with code ${code}`, type: "server_error", code: null },
+            error: { message, type: "server_error", code: null },
           })}\n\n`);
         }
       }
+      // Subprocess exited - ensure response is closed
       if (!res.writableEnded) {
         res.write("data: [DONE]\n\n");
         res.end();
@@ -524,7 +529,7 @@ async function handleNonStreamingResponse(
           clearSession(sessionCtx.sessionKey);
         }
       } else {
-        const message = `Claude CLI exited with code ${code} without response`;
+        const message = withCliStderr(`Claude CLI exited with code ${code} without response`, subprocess);
         summarizeOnce({ finish: "error", error: message });
         if (sessionCtx.resume && sessionCtx.sessionKey) {
           clearSession(sessionCtx.sessionKey);
@@ -533,7 +538,7 @@ async function handleNonStreamingResponse(
           replied = true;
           res.status(500).json({
             error: {
-              message: `Claude CLI exited with code ${code} without response`,
+              message,
               type: "server_error",
               code: null,
             },

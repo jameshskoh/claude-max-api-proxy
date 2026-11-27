@@ -1,5 +1,6 @@
-// Tests for the Host allowlist and the absence of CORS headers. Uses only
-// GET /health and OPTIONS requests, so the Claude CLI is never spawned.
+// Tests for the Host allowlist, the absence of CORS headers and request body
+// parsing. Uses only GET /health, OPTIONS requests and a POST with a malformed
+// body that is rejected before routing, so the Claude CLI is never spawned.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { request } from "node:http";
@@ -18,6 +19,7 @@ function send(
   method: string,
   path: string,
   headers: Record<string, string>,
+  body?: string,
 ): Promise<HttpResult> {
   return new Promise((resolve, reject) => {
     const req = request(
@@ -36,6 +38,9 @@ function send(
       },
     );
     req.on("error", reject);
+    if (body !== undefined) {
+      req.write(body);
+    }
     req.end();
   });
 }
@@ -92,5 +97,21 @@ describe("Host allowlist", () => {
       res.status !== 200 && res.status !== 204,
       `expected a status other than 200/204, got ${res.status}`,
     );
+  });
+});
+
+describe("request body parsing", () => {
+  it("answers malformed JSON with 400 and error code invalid_json", async () => {
+    const res = await send(
+      port,
+      "POST",
+      "/v1/chat/completions",
+      { host: "127.0.0.1", "content-type": "application/json" },
+      "{bad",
+    );
+    assert.equal(res.status, 400);
+    const body = JSON.parse(res.body) as { error: { code: string; type: string; message: string } };
+    assert.equal(body.error.code, "invalid_json");
+    assert.equal(body.error.type, "invalid_request_error");
   });
 });
